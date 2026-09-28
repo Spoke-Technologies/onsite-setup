@@ -60,6 +60,28 @@ for name in '' 'venue/pi' 'venue pi' '-bad;command' "$(printf '%129s' x)"; do
   if valid_name "$name"; then echo 'Accepted an invalid device name' >&2; exit 1; fi
 done
 
+(
+  FBI_ROUTE_NETWORK=10.128.211.0 FBI_ROUTE_MASK=255.255.255.0 FBI_ROUTE_GATEWAY=192.168.70.225
+  [[ $(route_cidr) == 10.128.211.0/24 ]]
+  [[ $(FBI_ROUTE_MASK=24 route_cidr) == 10.128.211.0/24 ]]
+  for mask in 255.0.255.0 33 garbage 0.0.0.255; do
+    if (FBI_ROUTE_MASK=$mask route_cidr) >/dev/null 2>&1; then exit 1; fi
+  done
+  if (FBI_ROUTE_NETWORK=10.128.211.7 route_cidr) >/dev/null 2>&1; then exit 1; fi
+  if (FBI_ROUTE_GATEWAY=999.1.1.1 route_cidr) >/dev/null 2>&1; then exit 1; fi
+  config_dir=$(mktemp -d)
+  trap 'rm -rf -- "$config_dir"' EXIT
+  printf '[global]\nworkgroup = EXISTING\n[other]\npath = /srv/other\n' >"$config_dir/original"
+  MAX_FBI_WATCH_DIR='/srv/custom FBI' FBI_GROUP=venue-fbi
+  render_samba_config "$config_dir/original" >"$config_dir/first"
+  render_samba_config "$config_dir/first" >"$config_dir/second"
+  [[ $(grep -c '^# BEGIN SPOKE FBI$' "$config_dir/second") == 1 ]]
+  grep -Fx 'workgroup = EXISTING' "$config_dir/second" >/dev/null
+  grep -Fx '   server min protocol = NT1' "$config_dir/second" >/dev/null
+  grep -Fx '   path = /srv/custom FBI' "$config_dir/second" >/dev/null
+  grep -Fx '   valid users = @venue-fbi' "$config_dir/second" >/dev/null
+)
+
 export THING_NAME=spoke-test THING_ARN=arn:aws:iot:ap-southeast-2:123456789012:thing/spoke-test
 export COMPONENT_VERSION=0.2.1 HUB_BASE_URL=https://hub.example.com/api ONSITE_AGENT_CLIENT_ID=agent_test ONSITE_AGENT_TRANSPORT=iot
 ONSITE_AGENT_PRIVATE_KEY=$(node -e 'process.stdout.write(require("node:crypto").generateKeyPairSync("ed25519").privateKey.export({format:"der",type:"pkcs8"}).toString("base64"))')

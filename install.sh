@@ -188,7 +188,11 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; }
 
 configure_transport() {
-  ask ONSITE_AGENT_TRANSPORT 'Deployment mode: iot or fbi [iot]:'
+  if [[ "${1:-}" == fbi ]]; then
+    ONSITE_AGENT_TRANSPORT=fbi
+  else
+    ask ONSITE_AGENT_TRANSPORT 'Deployment mode: iot or fbi [iot]:'
+  fi
   ONSITE_AGENT_TRANSPORT=${ONSITE_AGENT_TRANSPORT:-iot}
   case "$ONSITE_AGENT_TRANSPORT" in
     iot) ;;
@@ -209,12 +213,143 @@ configure_transport() {
       write_env FBI_GROUP "$FBI_GROUP"
       write_env MAX_FBI_LOCAL_DB_PATH "$MAX_FBI_LOCAL_DB_PATH"
       say "Will add ggc_user to $FBI_GROUP and create the group/folder if missing."
-      say 'Configure MAX to write FBI.csv and FBI.sem here; Samba/share setup is separate.'
+      say 'Samba will share this folder as fbi. Configure MAX to write FBI.csv and FBI.sem here.'
       ;;
     *) die 'Choose iot or fbi.' ;;
   esac
   export ONSITE_AGENT_TRANSPORT
   write_env ONSITE_AGENT_TRANSPORT "$ONSITE_AGENT_TRANSPORT"
+}
+
+route_cidr() {
+  python3 - "$FBI_ROUTE_NETWORK" "$FBI_ROUTE_MASK" "$FBI_ROUTE_GATEWAY" <<'PY'
+import ipaddress, sys
+try:
+    destination, mask, gateway = sys.argv[1:]
+    ipaddress.IPv4Address(destination)
+    if '.' in mask:
+        bits = f'{int(ipaddress.IPv4Address(mask)):032b}'
+        if '01' in bits:
+            raise ValueError('Subnet mask must have contiguous leading ones')
+        mask = str(bits.count('1'))
+    network = ipaddress.IPv4Network(f'{destination}/{mask}', strict=True)
+    gateway = ipaddress.IPv4Address(gateway)
+    if network.prefixlen == 0 or gateway.is_unspecified or gateway.is_multicast:
+        raise ValueError('Use a specific destination network and unicast gateway')
+    print(network)
+except ValueError as error:
+    sys.exit(f'Invalid route: {error}')
+PY
+}
+
+prompt_fbi_samba() {
+  ask FBI_SAMBA_USER 'Samba login username [FBI]:'
+  FBI_SAMBA_USER=${FBI_SAMBA_USER:-FBI}
+  [[ "$FBI_SAMBA_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$ ]] || die 'Invalid Samba username.'
+  [[ "$FBI_SAMBA_USER" != ggc_user && "$FBI_SAMBA_USER" != "$(id -un)" ]] ||
+    die 'Use a dedicated Samba account, separate from the agent and login user.'
+  local account
+  account=$(getent passwd "$FBI_SAMBA_USER" || true)
+  if [[ -n "$account" ]]; then
+    [[ $(cut -d: -f3 <<<"$account") != 0 && $(cut -d: -f7 <<<"$account") == */nologin ]] ||
+      die 'That account is not a dedicated non-login user; choose another username.'
+  fi
+  ask_secret FBI_SAMBA_PASSWORD 'Samba password (hidden):'
+  ask_secret FBI_SAMBA_PASSWORD_CONFIRM 'Confirm Samba password:'
+  [[ -n "$FBI_SAMBA_PASSWORD" && "$FBI_SAMBA_PASSWORD" == "$FBI_SAMBA_PASSWORD_CONFIRM" ]] || die 'Passwords are empty or do not match.'
+  unset FBI_SAMBA_PASSWORD_CONFIRM
+  # Restrict the path before putting it in Samba config or changing tree permissions.
+  [[ "$MAX_FBI_WATCH_DIR" != *[\%\"\;\#\\]* ]] || die 'The Samba folder must not contain %, quotes, backslashes, semicolons or #.'
+  MAX_FBI_WATCH_DIR=$(realpath -m -- "$MAX_FBI_WATCH_DIR")
+  case "$MAX_FBI_WATCH_DIR" in
+    /|/etc|/etc/*|/usr|/usr/*|/bin|/sbin|/lib|/lib/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/boot|/boot/*|/home|/root|/var|/srv|/mnt|/media|/tmp)
+      die 'Choose a dedicated FBI share directory.' ;;
+  esac
+  write_env FBI_SAMBA_USER "$FBI_SAMBA_USER"
+  write_env MAX_FBI_WATCH_DIR "$MAX_FBI_WATCH_DIR"
+  ask FBI_ROUTE_NETWORK 'Route destination network IP (blank to skip):'
+  if [[ -n "$FBI_ROUTE_NETWORK" ]]; then
+    command -v nmcli >/dev/null || die 'NetworkManager (nmcli) is required to save the route.'
+    ask FBI_ROUTE_MASK 'Subnet mask or prefix length [255.255.255.0]:'
+    FBI_ROUTE_MASK=${FBI_ROUTE_MASK:-255.255.255.0}
+    ask FBI_ROUTE_GATEWAY 'Gateway IP:'
+    FBI_ROUTE_CIDR=$(route_cidr) || return 1
+    nmcli -f DEVICE,STATE,CONNECTION device status
+    ask FBI_ROUTE_DEVICE 'Network interface for this route (for example eth0):'
+    [[ "$FBI_ROUTE_DEVICE" =~ ^[a-zA-Z0-9_.:-]+$ ]] || die 'Invalid network interface.'
+    FBI_ROUTE_CONNECTION=$(nmcli -g GENERAL.CON-UUID device show "$FBI_ROUTE_DEVICE")
+    [[ "$FBI_ROUTE_CONNECTION" =~ ^[0-9a-fA-F-]{36}$ ]] || die 'Choose an interface with an active NetworkManager connection.'
+    local field
+    for field in FBI_ROUTE_NETWORK FBI_ROUTE_MASK FBI_ROUTE_GATEWAY FBI_ROUTE_DEVICE; do
+      write_env "$field" "${!field}"
+    done
+  fi
+  say "Will share $MAX_FBI_WATCH_DIR as \\fbi, enable SMBv1 and add $(id -un), ggc_user and $FBI_SAMBA_USER to $FBI_GROUP."
+}
+
+render_samba_config() {
+  # Replace only our block; retain existing shares and unrelated configuration.
+  sed '/^# BEGIN SPOKE FBI$/,/^# END SPOKE FBI$/d' "$1"
+  cat <<EOF
+
+# BEGIN SPOKE FBI
+[global]
+   server min protocol = NT1
+   client min protocol = NT1
+   ntlm auth = yes
+
+[fbi]
+   path = $MAX_FBI_WATCH_DIR
+   browseable = yes
+   read only = no
+   guest ok = no
+   valid users = @$FBI_GROUP
+   force group = $FBI_GROUP
+   create mask = 0660
+   force create mode = 0660
+   directory mask = 2770
+   force directory mode = 2770
+# END SPOKE FBI
+EOF
+}
+
+setup_fbi_samba() {
+  sudo apt-get install -y samba
+  getent group "$FBI_GROUP" >/dev/null || sudo groupadd "$FBI_GROUP"
+  if ! id "$FBI_SAMBA_USER" >/dev/null 2>&1; then
+    sudo useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$FBI_GROUP" "$FBI_SAMBA_USER"
+  fi
+  sudo usermod -aG "$FBI_GROUP" "$FBI_SAMBA_USER"
+  sudo usermod -aG "$FBI_GROUP" "$(id -un)"
+  sudo -v
+  printf '%s\n%s\n' "$FBI_SAMBA_PASSWORD" "$FBI_SAMBA_PASSWORD" | sudo -n smbpasswd -s -a "$FBI_SAMBA_USER"
+  unset FBI_SAMBA_PASSWORD
+  sudo smbpasswd -e "$FBI_SAMBA_USER"
+  sudo mkdir -p -- "$MAX_FBI_WATCH_DIR"
+  sudo find "$MAX_FBI_WATCH_DIR" -xdev -type d -exec chown "$FBI_SAMBA_USER:$FBI_GROUP" '{}' +
+  sudo find "$MAX_FBI_WATCH_DIR" -xdev -type d -exec chmod 2770 '{}' +
+  sudo find "$MAX_FBI_WATCH_DIR" -xdev -type f -exec chown "$FBI_SAMBA_USER:$FBI_GROUP" '{}' +
+  sudo find "$MAX_FBI_WATCH_DIR" -xdev -type f -exec chmod 0660 '{}' +
+  local backup
+  backup=$(sudo mktemp /etc/samba/smb.conf.spoke-backup.XXXXXX)
+  sudo cat /etc/samba/smb.conf >"$work/smb-original.conf"
+  render_samba_config "$work/smb-original.conf" >"$work/smb.conf"
+  sudo testparm -s "$work/smb.conf" >/dev/null
+  sudo cp -p /etc/samba/smb.conf "$backup"
+  sudo install -o root -g root -m 644 "$work/smb.conf" /etc/samba/smb.conf
+  if ! sudo systemctl restart smbd; then
+    sudo cp -p "$backup" /etc/samba/smb.conf
+    sudo systemctl restart smbd || true
+    die "Samba failed to restart; restored $backup."
+  fi
+  sudo systemctl enable smbd
+  prepare_fbi_access
+  if [[ -n "${FBI_ROUTE_NETWORK:-}" ]]; then
+    sudo nmcli connection modify uuid "$FBI_ROUTE_CONNECTION" +ipv4.routes "$FBI_ROUTE_CIDR $FBI_ROUTE_GATEWAY"
+    sudo nmcli device reapply "$FBI_ROUTE_DEVICE"
+  fi
+  say "Samba ready: \\\\<Pi-IP>\\fbi — username $FBI_SAMBA_USER."
+  say "Reconnect your SSH session to pick up $(id -un)'s new group membership."
 }
 
 prepare_fbi_access() {
@@ -328,7 +463,8 @@ configure_sso_defaults() {
 }
 
 main() {
-  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh — interactive setup for a new 64-bit Raspberry Pi'; return; }
+  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only] — deploy a new Pi, or add Samba/route to an existing FBI device'; return; }
+  [[ -z "${1:-}" || "$1" == --fbi-share-only ]] || die 'Unknown option. Use --help.'
   # Keep prompts working when launched from a download command or SSH.
   exec </dev/tty
   [[ $EUID -ne 0 ]] || die 'Run as your normal Pi user; the wizard uses sudo when needed.'
@@ -336,7 +472,9 @@ main() {
   command -v apt-get >/dev/null || die 'A Debian-based OS is required.'
   [[ -d /run/systemd/system ]] || die 'systemd must be running.'
   sudo -v
-  [[ ! -e /greengrass/v2 ]] || die 'Greengrass already exists. This wizard is for new devices; no existing installation was changed.'
+  if [[ "${1:-}" != --fbi-share-only ]]; then
+    [[ ! -e /greengrass/v2 ]] || die 'Greengrass already exists. Use --fbi-share-only to add Samba/route without redeploying.'
+  fi
 
   umask 022
   work=$(mktemp -d)
@@ -346,6 +484,20 @@ main() {
   # Non-secret answers survive a failed attempt. Never source this file.
   mkdir -p "$HOME/.config/spoke-onsite"
   ENV_FILE="$HOME/.config/spoke-onsite/setup.env"
+  if [[ "${1:-}" == --fbi-share-only ]]; then
+    id ggc_user >/dev/null 2>&1 || die 'Install the onsite agent first; ggc_user is missing.'
+    TOTAL_STAGES=1
+    stage 'FBI Samba and route'
+    say 'Keep the folder and database paths already configured on this agent.'
+    sudo apt-get update
+    sudo apt-get install -y python3
+    configure_transport fbi
+    prompt_fbi_samba
+    confirm 'Apply Samba, folder permissions and the route?' || return 0
+    setup_fbi_samba
+    finish
+    return
+  fi
   TOTAL_STAGES=5
 
   stage 'Device name and prerequisites'
@@ -355,7 +507,7 @@ main() {
   say 'This installs Java, Node.js 22 and AWS CLI, then provisions and deploys the onsite agent.'
   confirm 'Install prerequisites on this Pi?' || return 0
   sudo apt-get update
-  sudo apt-get install -y ca-certificates default-jre-headless unzip curl jq
+  sudo apt-get install -y ca-certificates default-jre-headless unzip curl jq python3
   if [[ ! -x /usr/bin/node ]] || ! /usr/bin/node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
     curl -fSL https://deb.nodesource.com/setup_22.x -o "$work/node-setup.sh"
     sudo bash "$work/node-setup.sh"
@@ -421,6 +573,9 @@ main() {
 
   stage 'Hub credentials'
   configure_transport
+  if [[ "$ONSITE_AGENT_TRANSPORT" == fbi ]]; then
+    prompt_fbi_samba
+  fi
   ask HUB_BASE_URL 'Hub API URL [https://www.spokehub.com.au/api]:'
   HUB_BASE_URL=${HUB_BASE_URL:-https://www.spokehub.com.au/api}
   HUB_BASE_URL=${HUB_BASE_URL%/}
@@ -463,7 +618,7 @@ main() {
       --component-default-user ggc_user:ggc_group --provision true --setup-system-service true
   )
   if [[ "$ONSITE_AGENT_TRANSPORT" == fbi ]]; then
-    prepare_fbi_access
+    setup_fbi_samba
   fi
   sudo systemctl is-active --quiet greengrass
   DEPLOYMENT_ID=$(aws greengrassv2 create-deployment --cli-input-json "file://$work/deployment.json" --query deploymentId --output text)

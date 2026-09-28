@@ -35,23 +35,47 @@ FBI prompts default to:
 - Linux group: `fbi`
 - Local database: `/var/lib/spoke-onsite/max-fbi-agent.sqlite`
 
-All three can be changed. The wizard creates a missing group/folder, runs
-`sudo usermod -aG <chosen-group> ggc_user`, checks folder access and restarts
-Greengrass before deployment. Existing share ownership and permissions are preserved;
-if access checks fail, fix permissions for the chosen group. FBI requires directory
-write access to remove `FBI.sem`, plus readable exported files. Processed `FBI.csv`
-files are retained. The database directory is created for `ggc_user` if missing.
+All three can be changed. FBI setup also installs Samba and prompts for a dedicated
+login username (default `FBI`) and password. It shares the selected folder as `fbi`,
+enables SMBv1 (`NT1`) and NTLM authentication, and adds the Samba user, `ggc_user`
+and the current login user (normally `spoke`) to the selected group.
 
-Configure a MAX Gaming source with FBI live transport in Hub. Samba sharing and MAX
-exports must already be configured separately; verify a real `FBI.csv`/`FBI.sem`
-export reaches Hub after deployment.
+The share tree is owned by the Samba user/group, with directories set to `2770` and
+files to `0660`. New Samba files retain group read/write access. Existing unrelated
+Samba settings are retained, and `smb.conf` is backed up before the managed FBI block
+is installed. Firewall settings are not changed. Passwords are entered invisibly
+and are not saved in the wizard's answers file.
+
+For the route, enter the destination network IP, subnet mask (or prefix length),
+gateway IP and interface. Leave the destination blank if no route is needed. The
+wizard saves the route on that interface's active NetworkManager connection and
+applies it without disconnecting the interface. For example:
+
+```bash
+sudo nmcli connection modify uuid <connection-uuid> +ipv4.routes "10.128.211.0/24 192.168.70.225"
+sudo nmcli device reapply eth0
+```
+
+Configure a MAX Gaming source with FBI live transport in Hub. Connect from Windows
+to `\\<Pi-IP>\fbi` with the Samba username/password. Configure MAX to write
+`FBI.csv` and `FBI.sem`, then verify an export reaches Hub. Reconnect SSH to pick up
+the current user's new Linux group membership.
+
+### Add Samba to an already-deployed Pi
+
+This only configures the local share, group access and route; it does not provision
+AWS or redeploy the agent. Keep the folder/database paths configured on your agent.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh --fbi-share-only
+```
 
 Non-secret answers are saved in `~/.config/spoke-onsite/setup.env`. The private key
 is sent to the device's Greengrass configuration; its temporary deployment file is
 removed on exit. AWS CLI keeps its normal SSO cache. No credentials are embedded here.
 
-The wizard refuses existing local Greengrass installations and existing AWS device
-names. If provisioning partially fails, inspect the existing device before retrying;
+Full deployment refuses existing local Greengrass installations and existing AWS device
+names; use `--fbi-share-only` for an already-deployed Pi. If provisioning partially fails, inspect the existing device before retrying;
 it never deletes or replaces an installation. Logs:
 
 ```bash
@@ -59,6 +83,14 @@ sudo tail -n 100 -f /greengrass/v2/logs/greengrass.log
 sudo tail -n 100 -f /greengrass/v2/logs/com.spokehub.OnsiteAgent.log
 ```
 
-Development check (Bash, Node.js, jq and AWS CLI 2.37.4+): `bash test.sh`.
+Development check (Bash, Node.js, Python 3, jq and AWS CLI 2.37.4+): `bash test.sh`.
 The SSO check uses a temporary config with no sign-in or AWS requests.
-Hardware setup still requires a real Pi smoke test.
+Samba integration check in a disposable Linux container:
+
+```bash
+docker run --rm -v "$PWD:/src:ro" debian:trixie-slim bash -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends samba smbclient python3 sudo && bash /src/test-samba.sh'
+```
+
+This checks SMBv1 authentication and real filesystem permissions; service and route
+commands are stubbed inside the container. Live NetworkManager routing still needs
+a real Pi check.
