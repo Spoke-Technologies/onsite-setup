@@ -4,6 +4,33 @@ cd "$(dirname "$0")"
 bash -n install.sh
 source ./install.sh
 
+# Use the real CLI against an isolated config: no sign-in or AWS requests.
+if command -v aws >/dev/null; then
+  (
+    config_dir=$(mktemp -d)
+    trap 'rm -rf -- "$config_dir"' EXIT
+    export AWS_CONFIG_FILE="$config_dir/config" AWS_SHARED_CREDENTIALS_FILE="$config_dir/credentials"
+    export AWS_PROFILE=spoke-onsite-setup THING_NAME=spoke-magpies
+    printf '[profile unrelated]\nregion = us-east-1\n' >"$AWS_CONFIG_FILE"
+    configure_sso_defaults
+    aws configure set sso_account_id 123456789012 --profile "$AWS_PROFILE"
+    aws configure set sso_role_name Installer --profile "$AWS_PROFILE"
+    configure_sso_defaults
+    [[ $(aws configure get sso_session --profile "$AWS_PROFILE") == spoke-magpies-setup ]]
+    [[ $(aws configure get sso_account_id --profile "$AWS_PROFILE") == 123456789012 ]]
+    [[ $(aws configure get sso_role_name --profile "$AWS_PROFILE") == Installer ]]
+    [[ $(aws configure get region --profile unrelated) == us-east-1 ]]
+    node -e '
+      const fs = require("node:fs"), assert = require("node:assert/strict");
+      const config = fs.readFileSync(process.env.AWS_CONFIG_FILE, "utf8");
+      assert.equal(config.split("[sso-session spoke-magpies-setup]").length, 2);
+      for (const field of ["sso_start_url = https://spoke.awsapps.com/start", "sso_region = ap-southeast-2", "sso_registration_scopes = sso:account:access"]) assert(config.includes(field));
+    '
+  )
+else
+  echo 'SSO config check skipped (AWS CLI is not installed).'
+fi
+
 # Exercise the install under the restrictive umask that caused root-only files.
 (
   work=$(mktemp -d)

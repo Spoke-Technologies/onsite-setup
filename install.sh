@@ -252,6 +252,19 @@ install_aws_cli() (
   sudo "$work/aws/install"
 )
 
+configure_sso_defaults() {
+  local session_name="${THING_NAME}-setup" output
+  # Let AWS CLI write its own config format, preserving other profiles/sessions.
+  if ! output=$(printf '%s\n' "$session_name" https://spoke.awsapps.com/start \
+    ap-southeast-2 sso:account:access | aws configure sso-session 2>&1); then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+  aws configure set sso_session "$session_name" --profile "$AWS_PROFILE"
+  aws configure set region ap-southeast-2 --profile "$AWS_PROFILE"
+  aws configure set output json --profile "$AWS_PROFILE"
+}
+
 main() {
   [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh — interactive setup for a new 64-bit Raspberry Pi'; return; }
   # Keep prompts working when launched from a download command or SSH.
@@ -312,10 +325,14 @@ main() {
   say 'Use an AWS role with IoT/Greengrass provisioning, IAM role setup and deployment permissions.'
   say 'SSO start URL: https://spoke.awsapps.com/start — SSO region: ap-southeast-2.'
   say 'Open the device-code URL on your laptop when prompted; choose the account that hosts the agent.'
-  if ! aws configure get sso_session --profile "$AWS_PROFILE" >/dev/null; then
+  configure_sso_defaults
+  if ! aws configure get sso_account_id --profile "$AWS_PROFILE" >/dev/null 2>&1 ||
+     ! aws configure get sso_role_name --profile "$AWS_PROFILE" >/dev/null 2>&1; then
+    say "Session ${THING_NAME}-setup is prefilled. Press Enter to keep it, then select your account and role."
     aws configure sso --profile "$AWS_PROFILE" --use-device-code --no-browser
+  else
+    aws sso login --profile "$AWS_PROFILE" --use-device-code --no-browser
   fi
-  aws sso login --profile "$AWS_PROFILE" --use-device-code --no-browser
   local account
   account=$(aws sts get-caller-identity --query Account --output text)
   [[ "$account" =~ ^[0-9]{12}$ ]] || die 'Could not determine the AWS account.'

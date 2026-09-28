@@ -12,6 +12,9 @@ agent client ID and private key. It installs Java, Node.js and AWS CLI, provisio
 Greengrass as a boot service, deploys the published onsite agent, and waits for
 AWS to report deployment success. Then check the heartbeat and run a sync in Hub.
 
+SSO defaults are filled automatically, with session name `<device-name>-setup`.
+Press Enter to keep that session, approve browser sign-in and select your AWS account/role.
+
 You need:
 
 - A sudo-enabled user and outbound access to AWS, Hub and the venue's upstream system.
