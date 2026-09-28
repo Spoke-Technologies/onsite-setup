@@ -421,7 +421,8 @@ main() {
 
   stage 'Hub credentials'
   configure_transport
-  ask HUB_BASE_URL 'Hub API URL (https://your-hub-host/api):'
+  ask HUB_BASE_URL 'Hub API URL [https://www.spokehub.com.au/api]:'
+  HUB_BASE_URL=${HUB_BASE_URL:-https://www.spokehub.com.au/api}
   HUB_BASE_URL=${HUB_BASE_URL%/}
   [[ "$HUB_BASE_URL" == https://* ]] || die 'Use an HTTPS Hub URL.'
   open_url "${HUB_BASE_URL%/api}"
