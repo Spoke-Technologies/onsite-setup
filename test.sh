@@ -124,7 +124,12 @@ fi
 # Verify the AWS result for this deployment, not an older successful deployment.
 export DEPLOYMENT_ID=new-deployment
 aws() { printf '%s\n' "{\"effectiveDeployments\":[{\"deploymentId\":\"old\",\"coreDeviceExecutionStatus\":\"SUCCEEDED\"},{\"deploymentId\":\"new-deployment\",\"coreDeviceExecutionStatus\":\"$TEST_STATUS\"}]}"; }
-TEST_STATUS=SUCCEEDED wait_for_deployment
+# A successful terminal status must return without another polling sleep.
+(
+  sleep() { echo 'Polled again after a successful deployment' >&2; exit 1; }
+  TEST_STATUS=SUCCEEDED wait_for_deployment
+  TEST_STATUS=COMPLETED wait_for_deployment
+)
 for status in FAILED REJECTED TIMED_OUT CANCELED; do
   if (TEST_STATUS=$status wait_for_deployment) >/dev/null 2>&1; then
     echo 'Reported success for a failed deployment' >&2; exit 1

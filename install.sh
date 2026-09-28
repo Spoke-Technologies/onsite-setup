@@ -300,7 +300,7 @@ wait_for_deployment() {
       --output json | jq -r --arg id "$DEPLOYMENT_ID" \
       '[.effectiveDeployments[] | select(.deploymentId == $id)][0].coreDeviceExecutionStatus // "QUEUED"')
     case "$status" in
-      SUCCEEDED) return 0 ;;
+      COMPLETED|SUCCEEDED) return 0 ;;
       FAILED|REJECTED|TIMED_OUT|CANCELED) die "Deployment $DEPLOYMENT_ID ended with $status. Check /greengrass/v2/logs/com.spokehub.OnsiteAgent.log." ;;
     esac
     say "Deployment: $status (waiting up to 15 minutes)"
