@@ -245,6 +245,13 @@ wait_for_deployment() {
   die "Deployment $DEPLOYMENT_ID is still pending. Check Greengrass in AWS and /greengrass/v2/logs/greengrass.log."
 }
 
+install_aws_cli() (
+  # Unpacking and installing software must not inherit a private-file umask.
+  umask 022
+  unzip -q "$work/aws.zip" -d "$work"
+  sudo "$work/aws/install"
+)
+
 main() {
   [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh — interactive setup for a new 64-bit Raspberry Pi'; return; }
   # Keep prompts working when launched from a download command or SSH.
@@ -256,7 +263,7 @@ main() {
   sudo -v
   [[ ! -e /greengrass/v2 ]] || die 'Greengrass already exists. This wizard is for new devices; no existing installation was changed.'
 
-  umask 077
+  umask 022
   work=$(mktemp -d)
   trap 'rm -rf -- "$work"' EXIT
   trap 'exit 130' INT
@@ -280,12 +287,23 @@ main() {
     sudo apt-get install -y nodejs
   fi
   sudo -u nobody /usr/bin/node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)'
+  export PATH="/usr/local/bin:$PATH"
+  hash -r
+  # Recover installs made by the original wizard under umask 077.
+  if [[ -L /usr/local/bin/aws && ! -x /usr/local/bin/aws &&
+        $(readlink /usr/local/bin/aws) == /usr/local/aws-cli/* ]]; then
+    sudo chmod -R a+rX /usr/local/aws-cli
+  fi
   if ! command -v aws >/dev/null; then
     curl -fSL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o "$work/aws.zip"
-    unzip -q "$work/aws.zip" -d "$work"
-    sudo "$work/aws/install"
+    install_aws_cli
   fi
-  [[ $(aws --version 2>&1) == aws-cli/2.* ]] || die 'AWS CLI v2 is required; remove the older CLI and retry.'
+  local aws_version
+  if ! aws_version=$(aws --version 2>&1); then
+    printf '%s\n' "$aws_version" >&2
+    die 'AWS CLI could not run as your user. Check /usr/local/bin/aws permissions and PATH.'
+  fi
+  [[ "$aws_version" == aws-cli/2.* ]] || die "AWS CLI v2 is required; found: $aws_version"
 
   stage 'AWS sign-in'
   export AWS_REGION=ap-southeast-2 AWS_DEFAULT_REGION=ap-southeast-2 AWS_PAGER='' AWS_CLI_AUTO_PROMPT=off
@@ -335,7 +353,7 @@ main() {
   validate_hub_credentials || die 'Invalid Hub credentials or URL.'
   write_env HUB_BASE_URL "$HUB_BASE_URL"
   write_env ONSITE_AGENT_CLIENT_ID "$ONSITE_AGENT_CLIENT_ID"
-  deployment_json >"$work/deployment.json"
+  (umask 077; deployment_json >"$work/deployment.json")
   unset ONSITE_AGENT_PRIVATE_KEY
 
   stage 'Provision and deploy'

@@ -4,6 +4,29 @@ cd "$(dirname "$0")"
 bash -n install.sh
 source ./install.sh
 
+# Exercise the install under the restrictive umask that caused root-only files.
+(
+  work=$(mktemp -d)
+  export work
+  trap 'rm -rf -- "$work"' EXIT
+  umask 077
+  unzip() {
+    mkdir "$work/aws"
+    printf '#!/bin/bash\nmkdir "$work/installed"\ntouch "$work/installed/aws"\n' >"$work/aws/install"
+    chmod +x "$work/aws/install"
+  }
+  sudo() { "$@"; }
+  install_aws_cli
+  node -e '
+    const fs = require("node:fs"), assert = require("node:assert/strict");
+    const mode = path => fs.statSync(process.env.work + path).mode & 0o777;
+    assert.equal(mode("/aws"), 0o755);
+    assert.equal(mode("/installed"), 0o755);
+    assert.equal(mode("/installed/aws"), 0o644);
+  '
+  [[ $(umask) == 0077 ]]
+)
+
 valid_name spoke-venue_01
 for name in '' 'venue/pi' 'venue pi' '-bad;command' "$(printf '%129s' x)"; do
   if valid_name "$name"; then echo 'Accepted an invalid device name' >&2; exit 1; fi
