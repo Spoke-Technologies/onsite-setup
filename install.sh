@@ -253,16 +253,14 @@ install_aws_cli() (
 )
 
 configure_sso_defaults() {
-  local session_name="${THING_NAME}-setup" output
-  # Let AWS CLI write its own config format, preserving other profiles/sessions.
-  if ! output=$(printf '%s\n' "$session_name" https://spoke.awsapps.com/start \
-    ap-southeast-2 sso:account:access | aws configure sso-session 2>&1); then
-    printf '%s\n' "$output" >&2
-    return 1
-  fi
-  aws configure set sso_session "$session_name" --profile "$AWS_PROFILE"
+  local session_name="${THING_NAME}-setup"
+  # Create the selected profile before configuring its SSO session.
   aws configure set region ap-southeast-2 --profile "$AWS_PROFILE"
   aws configure set output json --profile "$AWS_PROFILE"
+  aws configure set --sso-session "$session_name" sso_start_url https://spoke.awsapps.com/start
+  aws configure set --sso-session "$session_name" sso_region ap-southeast-2
+  aws configure set --sso-session "$session_name" sso_registration_scopes sso:account:access
+  aws configure set sso_session "$session_name" --profile "$AWS_PROFILE"
 }
 
 main() {

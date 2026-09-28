@@ -43,5 +43,6 @@ sudo tail -n 100 -f /greengrass/v2/logs/greengrass.log
 sudo tail -n 100 -f /greengrass/v2/logs/com.spokehub.OnsiteAgent.log
 ```
 
-Development check (Bash, Node.js and jq): `bash test.sh`.
+Development check (Bash, Node.js, jq and AWS CLI 2.37.4+): `bash test.sh`.
+The SSO check uses a temporary config with no sign-in or AWS requests.
 Hardware setup still requires a real Pi smoke test.

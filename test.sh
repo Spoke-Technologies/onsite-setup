@@ -11,11 +11,12 @@ if command -v aws >/dev/null; then
     trap 'rm -rf -- "$config_dir"' EXIT
     export AWS_CONFIG_FILE="$config_dir/config" AWS_SHARED_CREDENTIALS_FILE="$config_dir/credentials"
     export AWS_PROFILE=spoke-onsite-setup THING_NAME=spoke-magpies
-    printf '[profile unrelated]\nregion = us-east-1\n' >"$AWS_CONFIG_FILE"
-    configure_sso_defaults
+    # Start with no config/profile at all, as on a fresh Pi.
+    configure_sso_defaults </dev/null
+    aws configure set region us-east-1 --profile unrelated
     aws configure set sso_account_id 123456789012 --profile "$AWS_PROFILE"
     aws configure set sso_role_name Installer --profile "$AWS_PROFILE"
-    configure_sso_defaults
+    configure_sso_defaults </dev/null
     [[ $(aws configure get sso_session --profile "$AWS_PROFILE") == spoke-magpies-setup ]]
     [[ $(aws configure get sso_account_id --profile "$AWS_PROFILE") == 123456789012 ]]
     [[ $(aws configure get sso_role_name --profile "$AWS_PROFILE") == Installer ]]
