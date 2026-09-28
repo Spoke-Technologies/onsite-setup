@@ -61,7 +61,7 @@ for name in '' 'venue/pi' 'venue pi' '-bad;command' "$(printf '%129s' x)"; do
 done
 
 export THING_NAME=spoke-test THING_ARN=arn:aws:iot:ap-southeast-2:123456789012:thing/spoke-test
-export COMPONENT_VERSION=0.2.1 HUB_BASE_URL=https://hub.example.com/api ONSITE_AGENT_CLIENT_ID=agent_test
+export COMPONENT_VERSION=0.2.1 HUB_BASE_URL=https://hub.example.com/api ONSITE_AGENT_CLIENT_ID=agent_test ONSITE_AGENT_TRANSPORT=iot
 ONSITE_AGENT_PRIVATE_KEY=$(node -e 'process.stdout.write(require("node:crypto").generateKeyPairSync("ed25519").privateKey.export({format:"der",type:"pkcs8"}).toString("base64"))')
 export ONSITE_AGENT_PRIVATE_KEY
 validate_hub_credentials
@@ -74,6 +74,44 @@ deployment_json | jq -e '
       .HubBaseUrl == env.HUB_BASE_URL and .OnsiteAgentTransport == "iot" and
       .accessControl["aws.greengrass.ipc.mqttproxy"]["com.spokehub.OnsiteAgent:mqttproxy:1"].resources == ["spoke/onsite-agents/agent_test/commands"]))
 ' >/dev/null
+(
+  test_dir=$(mktemp -d)
+  trap 'rm -rf -- "$test_dir"' EXIT
+  ENV_FILE="$test_dir/answers"
+  configure_transport <<< $'fbi\n\n\n\n' >/dev/null
+  [[ "$FBI_GROUP" == fbi && "$MAX_FBI_WATCH_DIR" == /srv/samba/fbi ]]
+  [[ "$MAX_FBI_LOCAL_DB_PATH" == /var/lib/spoke-onsite/max-fbi-agent.sqlite ]]
+  configure_transport <<< $'fbi\n/srv/custom FBI\nvenue-fbi\n/var/lib/custom/queue.sqlite' >/dev/null
+  [[ "$FBI_GROUP" == venue-fbi ]]
+  deployment_json | jq -e '.components["com.spokehub.OnsiteAgent"].configurationUpdate.merge | fromjson |
+    .OnsiteAgentTransport == "fbi" and .MaxFbiWatchDir == "/srv/custom FBI" and
+    .MaxFbiLocalDbPath == "/var/lib/custom/queue.sqlite" and .MaxFbiDeleteProcessedFiles == "false"' >/dev/null
+  if (configure_transport <<< $'fbi\nrelative/path\nfbi\n/var/lib/queue.sqlite') >/dev/null 2>&1; then
+    echo 'Accepted a relative FBI path' >&2; exit 1
+  fi
+  if (configure_transport <<< $'fbi\n/srv/fbi\n--bad-group\n/var/lib/queue.sqlite') >/dev/null 2>&1; then
+    echo 'Accepted an invalid group' >&2; exit 1
+  fi
+  # Exercise filesystem setup with privilege/account commands recorded, not run.
+  MAX_FBI_WATCH_DIR="$test_dir/share with spaces"
+  MAX_FBI_LOCAL_DB_PATH="$test_dir/database/queue.sqlite"
+  getent() { return 1; }
+  sudo() {
+    printf '%s\n' "$*" >>"$test_dir/commands"
+    case "$1" in
+      groupadd|usermod|systemctl) return 0 ;;
+      install) mkdir -p -- "${@: -1}" ;;
+      -u) shift 2; "$@" ;;
+      *) return 1 ;;
+    esac
+  }
+  prepare_fbi_access
+  [[ -d "$MAX_FBI_WATCH_DIR" && -d "$test_dir/database" ]]
+  grep -Fx 'groupadd venue-fbi' "$test_dir/commands" >/dev/null
+  grep -Fx 'usermod -aG venue-fbi ggc_user' "$test_dir/commands" >/dev/null
+  grep -Fx 'systemctl restart greengrass' "$test_dir/commands" >/dev/null
+  [[ -z $(ls -A "$MAX_FBI_WATCH_DIR") ]]
+)
 for url in http://hub.example.com/api https://user:pass@hub.example.com/api 'https://hub.example.com/api?key=secret'; do
   if (export HUB_BASE_URL="$url"; validate_hub_credentials) >/dev/null 2>&1; then
     echo 'Accepted an unsafe Hub URL' >&2; exit 1

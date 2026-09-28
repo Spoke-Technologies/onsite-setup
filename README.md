@@ -7,7 +7,7 @@ Flash the OS, enable SSH, connect to the venue network, then run as your normal 
 curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh
 ```
 
-The wizard asks for a device name, guides AWS sign-in, and asks for the Hub URL,
+The wizard asks for a device name, guides AWS sign-in, and asks for the deployment mode, Hub URL,
 agent client ID and private key. It installs Java, Node.js and AWS CLI, provisions
 Greengrass as a boot service, deploys the published onsite agent, and waits for
 AWS to report deployment success. Then check the heartbeat and run a sync in Hub.
@@ -28,7 +28,23 @@ You need:
 
 This public repository contains only the installer. Agent code and releases remain
 in [spoke-hub](https://github.com/Spoke-Technologies/spoke-hub) and your AWS account.
-It uses the existing IoT transport and `spoke/onsite-agents` topic prefix.
+Choose **iot** for commands over `spoke/onsite-agents`, or **fbi** for MAX file exports.
+FBI prompts default to:
+
+- Folder: `/srv/samba/fbi`
+- Linux group: `fbi`
+- Local database: `/var/lib/spoke-onsite/max-fbi-agent.sqlite`
+
+All three can be changed. The wizard creates a missing group/folder, runs
+`sudo usermod -aG <chosen-group> ggc_user`, checks folder access and restarts
+Greengrass before deployment. Existing share ownership and permissions are preserved;
+if access checks fail, fix permissions for the chosen group. FBI requires directory
+write access to remove `FBI.sem`, plus readable exported files. Processed `FBI.csv`
+files are retained. The database directory is created for `ggc_user` if missing.
+
+Configure a MAX Gaming source with FBI live transport in Hub. Samba sharing and MAX
+exports must already be configured separately; verify a real `FBI.csv`/`FBI.sem`
+export reaches Hub after deployment.
 
 Non-secret answers are saved in `~/.config/spoke-onsite/setup.env`. The private key
 is sent to the device's Greengrass configuration; its temporary deployment file is

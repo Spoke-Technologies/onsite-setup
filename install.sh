@@ -187,6 +187,66 @@ finish() {
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; }
 
+configure_transport() {
+  ask ONSITE_AGENT_TRANSPORT 'Deployment mode: iot or fbi [iot]:'
+  ONSITE_AGENT_TRANSPORT=${ONSITE_AGENT_TRANSPORT:-iot}
+  case "$ONSITE_AGENT_TRANSPORT" in
+    iot) ;;
+    fbi)
+      ask MAX_FBI_WATCH_DIR 'FBI folder [/srv/samba/fbi]:'
+      MAX_FBI_WATCH_DIR=${MAX_FBI_WATCH_DIR:-/srv/samba/fbi}
+      ask FBI_GROUP 'FBI folder group [fbi]:'
+      FBI_GROUP=${FBI_GROUP:-fbi}
+      ask MAX_FBI_LOCAL_DB_PATH 'Local database [/var/lib/spoke-onsite/max-fbi-agent.sqlite]:'
+      MAX_FBI_LOCAL_DB_PATH=${MAX_FBI_LOCAL_DB_PATH:-/var/lib/spoke-onsite/max-fbi-agent.sqlite}
+      [[ "$FBI_GROUP" =~ ^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$ ]] || die 'Invalid Linux group name.'
+      for value in "$MAX_FBI_WATCH_DIR" "$MAX_FBI_LOCAL_DB_PATH"; do
+        [[ "$value" == /* && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die 'Use absolute paths without line breaks.'
+      done
+      [[ "$MAX_FBI_LOCAL_DB_PATH" != */ ]] || die 'The database path must name a file.'
+      export MAX_FBI_WATCH_DIR MAX_FBI_LOCAL_DB_PATH
+      write_env MAX_FBI_WATCH_DIR "$MAX_FBI_WATCH_DIR"
+      write_env FBI_GROUP "$FBI_GROUP"
+      write_env MAX_FBI_LOCAL_DB_PATH "$MAX_FBI_LOCAL_DB_PATH"
+      say "Will add ggc_user to $FBI_GROUP and create the group/folder if missing."
+      say 'Configure MAX to write FBI.csv and FBI.sem here; Samba/share setup is separate.'
+      ;;
+    *) die 'Choose iot or fbi.' ;;
+  esac
+  export ONSITE_AGENT_TRANSPORT
+  write_env ONSITE_AGENT_TRANSPORT "$ONSITE_AGENT_TRANSPORT"
+}
+
+prepare_fbi_access() {
+  getent group "$FBI_GROUP" >/dev/null || sudo groupadd "$FBI_GROUP"
+  sudo usermod -aG "$FBI_GROUP" ggc_user
+  if [[ ! -d "$MAX_FBI_WATCH_DIR" ]]; then
+    sudo install -d -o root -g "$FBI_GROUP" -m 2770 -- "$MAX_FBI_WATCH_DIR"
+  fi
+  # Existing shares retain their ownership and permissions.
+  sudo -u ggc_user test -r "$MAX_FBI_WATCH_DIR" &&
+    sudo -u ggc_user test -w "$MAX_FBI_WATCH_DIR" &&
+    sudo -u ggc_user test -x "$MAX_FBI_WATCH_DIR" ||
+    die "ggc_user needs read/write/traverse access to $MAX_FBI_WATCH_DIR (including parent directories)."
+  local probe db_dir
+  probe=$(sudo -u ggc_user mktemp "$MAX_FBI_WATCH_DIR/.spoke-access.XXXXXX")
+  sudo -u ggc_user rm -- "$probe"
+  if [[ -e "$MAX_FBI_WATCH_DIR/FBI.csv" ]]; then
+    sudo -u ggc_user test -r "$MAX_FBI_WATCH_DIR/FBI.csv" || die 'ggc_user cannot read the existing FBI.csv.'
+  fi
+  db_dir=$(dirname -- "$MAX_FBI_LOCAL_DB_PATH")
+  if [[ ! -d "$db_dir" ]]; then
+    sudo install -d -o ggc_user -g ggc_group -m 700 -- "$db_dir"
+  fi
+  sudo -u ggc_user test -w "$db_dir" && sudo -u ggc_user test -x "$db_dir" ||
+    die "ggc_user needs write/traverse access to $db_dir for SQLite."
+  if [[ -e "$MAX_FBI_LOCAL_DB_PATH" ]]; then
+    sudo -u ggc_user test -r "$MAX_FBI_LOCAL_DB_PATH" &&
+      sudo -u ggc_user test -w "$MAX_FBI_LOCAL_DB_PATH" || die 'ggc_user cannot read/write the existing database.'
+  fi
+  sudo systemctl restart greengrass
+}
+
 validate_hub_credentials() {
   node <<'JS'
 const { createPrivateKey } = require('node:crypto');
@@ -214,7 +274,7 @@ deployment_json() {
         HubBaseUrl: env.HUB_BASE_URL,
         OnsiteAgentClientId: env.ONSITE_AGENT_CLIENT_ID,
         OnsiteAgentPrivateKey: env.ONSITE_AGENT_PRIVATE_KEY,
-        OnsiteAgentTransport: "iot",
+        OnsiteAgentTransport: env.ONSITE_AGENT_TRANSPORT,
         OnsiteAgentVersion: env.COMPONENT_VERSION,
         OnsiteAgentIotTopicPrefix: "spoke/onsite-agents",
         accessControl: {"aws.greengrass.ipc.mqttproxy": {
@@ -224,7 +284,11 @@ deployment_json() {
             resources: [("spoke/onsite-agents/" + env.ONSITE_AGENT_CLIENT_ID + "/commands")]
           }
         }}
-      } | tojson)}
+      } + (if env.ONSITE_AGENT_TRANSPORT == "fbi" then {
+        MaxFbiWatchDir: env.MAX_FBI_WATCH_DIR,
+        MaxFbiLocalDbPath: env.MAX_FBI_LOCAL_DB_PATH,
+        MaxFbiDeleteProcessedFiles: "false"
+      } else {} end) | tojson)}
     }}
   }'
 }
@@ -356,11 +420,15 @@ main() {
     --arn "arn:aws:greengrass:$AWS_REGION:$account:components:com.spokehub.OnsiteAgent:versions:$COMPONENT_VERSION" >/dev/null
 
   stage 'Hub credentials'
+  configure_transport
   ask HUB_BASE_URL 'Hub API URL (https://your-hub-host/api):'
   HUB_BASE_URL=${HUB_BASE_URL%/}
   [[ "$HUB_BASE_URL" == https://* ]] || die 'Use an HTTPS Hub URL.'
   open_url "${HUB_BASE_URL%/api}"
   step 'In your organization settings, configure the member source and click Bootstrap Agent.'
+  if [[ "$ONSITE_AGENT_TRANSPORT" == fbi ]]; then
+    step 'Use the MAX Gaming member source with FBI live transport.'
+  fi
   step 'Copy its client ID and single-line private key. Keep upstream credentials configured in Hub.'
   ask ONSITE_AGENT_CLIENT_ID 'Client ID:'
   ask_secret ONSITE_AGENT_PRIVATE_KEY 'Private key (hidden):'
@@ -372,7 +440,7 @@ main() {
   unset ONSITE_AGENT_PRIVATE_KEY
 
   stage 'Provision and deploy'
-  say "Create $THING_NAME in AWS account $account and deploy agent $COMPONENT_VERSION."
+  say "Create $THING_NAME in AWS account $account and deploy agent $COMPONENT_VERSION ($ONSITE_AGENT_TRANSPORT)."
   say 'The existing GreengrassV2TokenExchangeRole needs access to the agent artifact bucket (configured by spoke-hub).'
   confirm 'Provision this device and deploy the agent?' || return 0
   curl -fSL https://d2s8p88vqu9w66.cloudfront.net/releases/greengrass-nucleus-latest.zip -o "$work/greengrass.zip"
@@ -393,6 +461,9 @@ main() {
       --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias \
       --component-default-user ggc_user:ggc_group --provision true --setup-system-service true
   )
+  if [[ "$ONSITE_AGENT_TRANSPORT" == fbi ]]; then
+    prepare_fbi_access
+  fi
   sudo systemctl is-active --quiet greengrass
   DEPLOYMENT_ID=$(aws greengrassv2 create-deployment --cli-input-json "file://$work/deployment.json" --query deploymentId --output text)
   rm -f "$work/deployment.json"
@@ -402,7 +473,11 @@ main() {
   wait_for_deployment
   finish
   say "Agent $COMPONENT_VERSION deployed to $THING_NAME. Greengrass starts on boot."
-  say 'In Hub, confirm a recent agent heartbeat and request a sync to verify venue connectivity.'
+  if [[ "$ONSITE_AGENT_TRANSPORT" == fbi ]]; then
+    say 'Confirm a recent heartbeat in Hub, then verify a real MAX FBI.csv/FBI.sem export reaches Hub.'
+  else
+    say 'In Hub, confirm a recent agent heartbeat and request a sync to verify venue connectivity.'
+  fi
   say 'Logs: sudo tail -n 100 -f /greengrass/v2/logs/com.spokehub.OnsiteAgent.log'
 }
 
