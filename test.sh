@@ -26,6 +26,65 @@ source ./install.sh
   [[ $(main --help) == *--eth-mac* ]]
 )
 
+# Exercise Tailscale setup without installing packages or joining a tailnet.
+(
+  work=$(mktemp -d)
+  trap 'rm -rf -- "$work"' EXIT
+  export work TEST_FAIL='' TEST_INSTALLED=0 TEST_CONFIRM=yes
+  export TEST_INITIAL_JSON='{"BackendState":"NeedsLogin"}'
+  export TEST_FINAL_JSON='{"BackendState":"Running","Self":{"Tags":["tag:restricted"]}}'
+  command() {
+    if [[ "$*" == '-v tailscale' ]]; then
+      [[ "$TEST_INSTALLED" == 1 || -f "$work/installed" ]]; return
+    fi
+    builtin command "$@"
+  }
+  curl() {
+    echo curl >>"$work/calls"
+    [[ "$TEST_FAIL" != curl ]] || return 1
+    [[ "$*" == "-fsSL https://tailscale.com/install.sh -o $work/tailscale-install.sh" ]]
+    touch "$work/tailscale-install.sh"
+  }
+  sudo() {
+    printf '%s\n' "$*" >>"$work/calls"
+    [[ "$TEST_FAIL" != "$*" ]] || return 1
+    case "$*" in
+      'apt-get update'|'apt-get install -y ca-certificates curl jq'|'systemctl enable --now tailscaled') ;;
+      "sh $work/tailscale-install.sh") [[ -f "$work/tailscale-install.sh" ]]; touch "$work/installed" ;;
+      'tailscale status --json')
+        if [[ -f "$work/up" ]]; then printf '%s\n' "$TEST_FINAL_JSON"; else printf '%s\n' "$TEST_INITIAL_JSON"; fi ;;
+      'tailscale up --advertise-tags=tag:restricted --timeout=5m') touch "$work/up" ;;
+      'tailscale ip -4') echo 100.64.0.1 ;;
+      *) return 1 ;;
+    esac
+  }
+  export -f command curl sudo
+  run_tailscale() {
+    rm -f "$work/installed" "$work/up" "$work/calls" "$work/tailscale-install.sh"
+    bash -c 'source ./install.sh; confirm() { [[ "$TEST_CONFIRM" == yes ]]; }; setup_tailscale' >"$work/output" 2>&1
+  }
+  run_tailscale
+  grep -Fx 'systemctl enable --now tailscaled' "$work/calls" >/dev/null
+  grep -Fx "sh $work/tailscale-install.sh" "$work/calls" >/dev/null
+  grep -Fx 'tailscale up --advertise-tags=tag:restricted --timeout=5m' "$work/calls" >/dev/null
+  grep -F '100.64.0.1' "$work/output" >/dev/null
+  TEST_INSTALLED=1 TEST_INITIAL_JSON="$TEST_FINAL_JSON" run_tailscale
+  if grep -E '^(curl|sh |tailscale up )' "$work/calls"; then exit 1; fi
+  for TEST_FINAL_JSON in '{"BackendState":"Running","Self":{}}' '{"BackendState":"NeedsMachineAuth","Self":{"Tags":["tag:restricted"]}}' '{"BackendState":"Running","Self":{"Tags":["tag:other"]}}'; do
+    if run_tailscale; then echo 'Accepted an unapproved or missing Tailscale tag' >&2; exit 1; fi
+    if grep -F 'Setup complete' "$work/output"; then exit 1; fi
+  done
+  TEST_FINAL_JSON='{"BackendState":"Running","Self":{"Tags":["tag:restricted"]}}'
+  for TEST_FAIL in 'apt-get update' 'apt-get install -y ca-certificates curl jq' curl "sh $work/tailscale-install.sh" 'systemctl enable --now tailscaled' 'tailscale status --json' 'tailscale up --advertise-tags=tag:restricted --timeout=5m' 'tailscale ip -4'; do
+    if run_tailscale; then echo "Ignored Tailscale failure: $TEST_FAIL" >&2; exit 1; fi
+    if grep -F 'Setup complete' "$work/output"; then exit 1; fi
+  done
+  TEST_CONFIRM=no run_tailscale
+  [[ ! -f "$work/calls" ]]
+  if (main --tailscale-only extra </dev/null) >/dev/null 2>&1; then exit 1; fi
+  [[ $(main --help) == *--tailscale-only* ]]
+)
+
 # Use the real CLI against an isolated config: no sign-in or AWS requests.
 if command -v aws >/dev/null; then
   (
