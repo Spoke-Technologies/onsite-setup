@@ -87,6 +87,33 @@ Non-secret answers are saved in `~/.config/spoke-onsite/setup.env`. The private 
 is sent to the device's Greengrass configuration; its temporary deployment file is
 removed on exit. AWS CLI keeps its normal SSO cache. No credentials are embedded here.
 
+### Set up Tailscale remote access
+
+Run as your normal sudo-enabled Pi user, before or after deploying the onsite agent:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh --tailscale-only
+```
+
+This installs Tailscale using its [official Linux installer](https://tailscale.com/docs/install/linux),
+enables `tailscaled` on boot and connects the Pi with `tag:restricted`. Open the
+login URL printed in the terminal on your laptop and sign in. If device approval
+is enabled, approve the Pi in the Tailscale admin console. Sign-in/approval has a
+five-minute timeout; rerun the command if needed. Setup verifies the connection
+and assigned tag, then prints the Pi's Tailscale IPv4 address. Existing connected
+devices already carrying `tag:restricted` keep their current session.
+
+Your tailnet must already [define `tag:restricted` and its owners](https://tailscale.com/docs/features/tags).
+The signing-in account must be allowed to assign it. **The tag name alone does
+not restrict access**: configure your tailnet's grants/ACLs for this tag. Tagging
+changes a user-owned device to a tagged server identity.
+
+This command sets up access to the Pi itself using its existing services, including
+normal SSH. It does not enable Tailscale SSH, subnet routing or exit-node routing,
+and does not provision AWS or redeploy the agent. Existing custom Tailscale
+settings are not reset: if the CLI asks you to include existing flags, follow its
+printed command before rerunning the wizard.
+
 Full deployment refuses existing local Greengrass installations and existing AWS device
 names; use `--fbi-share-only` for an already-deployed Pi. If provisioning partially fails, inspect the existing device before retrying;
 it never deletes or replaces an installation. Logs:

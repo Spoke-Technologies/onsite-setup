@@ -469,14 +469,48 @@ configure_sso_defaults() {
   aws configure set sso_session "$session_name" --profile "$AWS_PROFILE"
 }
 
+setup_tailscale() {
+  TOTAL_STAGES=2
+  stage 'Install Tailscale'
+  say 'This connects the Pi to your tailnet as tag:restricted and starts Tailscale on boot.'
+  say 'Your tailnet must define tag:restricted and allow your account to assign it.'
+  note 'Access is controlled by your tailnet policy; the tag name alone does not restrict traffic.'
+  confirm 'Set up Tailscale on this Pi?' || return 0
+  sudo apt-get update
+  sudo apt-get install -y ca-certificates curl jq
+  if ! command -v tailscale >/dev/null; then
+    curl -fsSL https://tailscale.com/install.sh -o "$work/tailscale-install.sh"
+    sudo sh "$work/tailscale-install.sh"
+  fi
+  sudo systemctl enable --now tailscaled
+
+  stage 'Connect with tag:restricted'
+  local status
+  status=$(sudo tailscale status --json) || die 'Could not read Tailscale status.'
+  if ! jq -e '.BackendState == "Running" and ((.Self.Tags // []) | index("tag:restricted") != null)' <<<"$status" >/dev/null; then
+    say 'Open the login URL printed below on your laptop and sign in as a tag owner.'
+    say 'If device approval is enabled, approve this Pi in the Tailscale admin console.'
+    sudo tailscale up --advertise-tags=tag:restricted --timeout=5m ||
+      die 'Tailscale did not connect. Check tag permissions, device approval and any existing-settings instructions above, then rerun.'
+    status=$(sudo tailscale status --json) || die 'Could not verify Tailscale status.'
+  fi
+  jq -e '.BackendState == "Running" and ((.Self.Tags // []) | index("tag:restricted") != null)' <<<"$status" >/dev/null ||
+    die 'Tailscale is not running with an approved tag:restricted. Check the tailnet policy and device approval, then rerun.'
+  local ip
+  ip=$(sudo tailscale ip -4) || die 'Could not read the Tailscale IPv4 address.'
+  finish
+  say "Tailscale is connected with tag:restricted. Remote access IP: $ip"
+}
+
 main() {
-  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only | --eth-mac] — deploy a new Pi, add Samba/route, or show the eth0 MAC address'; return; }
+  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only | --eth-mac | --tailscale-only] — deploy a new Pi, add Samba/route, show the eth0 MAC, or set up Tailscale with tag:restricted'; return; }
   if [[ "${1:-}" == --eth-mac ]]; then
     [[ $# -eq 1 ]] || die 'Use --eth-mac without additional arguments.'
     show_eth_mac
     return
   fi
-  [[ -z "${1:-}" || "$1" == --fbi-share-only ]] || die 'Unknown option. Use --help.'
+  [[ -z "${1:-}" || "$1" == --fbi-share-only || "$1" == --tailscale-only ]] || die 'Unknown option. Use --help.'
+  [[ "${1:-}" != --tailscale-only || $# -eq 1 ]] || die 'Use --tailscale-only without additional arguments.'
   # Keep prompts working when launched from a download command or SSH.
   exec </dev/tty
   [[ $EUID -ne 0 ]] || die 'Run as your normal Pi user; the wizard uses sudo when needed.'
@@ -484,7 +518,7 @@ main() {
   command -v apt-get >/dev/null || die 'A Debian-based OS is required.'
   [[ -d /run/systemd/system ]] || die 'systemd must be running.'
   sudo -v
-  if [[ "${1:-}" != --fbi-share-only ]]; then
+  if [[ "${1:-}" != --fbi-share-only && "${1:-}" != --tailscale-only ]]; then
     [[ ! -e /greengrass/v2 ]] || die 'Greengrass already exists. Use --fbi-share-only to add Samba/route without redeploying.'
   fi
 
@@ -493,6 +527,10 @@ main() {
   trap 'rm -rf -- "$work"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  if [[ "${1:-}" == --tailscale-only ]]; then
+    setup_tailscale
+    return
+  fi
   # Non-secret answers survive a failed attempt. Never source this file.
   mkdir -p "$HOME/.config/spoke-onsite"
   ENV_FILE="$HOME/.config/spoke-onsite/setup.env"
