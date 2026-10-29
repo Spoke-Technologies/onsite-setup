@@ -187,6 +187,13 @@ finish() {
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; }
 
+show_eth_mac() {
+  local mac
+  mac=$(cat /sys/class/net/eth0/address 2>/dev/null) || die 'Could not read the Ethernet MAC address from eth0. Run this on the Pi with its Ethernet interface available.'
+  [[ "$mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ && "$mac" != 00:00:00:00:00:00 ]] || die 'eth0 did not report a valid Ethernet MAC address.'
+  printf 'Ethernet MAC (eth0): %s\n' "$mac"
+}
+
 configure_transport() {
   if [[ "${1:-}" == fbi ]]; then
     ONSITE_AGENT_TRANSPORT=fbi
@@ -463,7 +470,12 @@ configure_sso_defaults() {
 }
 
 main() {
-  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only] — deploy a new Pi, or add Samba/route to an existing FBI device'; return; }
+  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only | --eth-mac] — deploy a new Pi, add Samba/route, or show the eth0 MAC address'; return; }
+  if [[ "${1:-}" == --eth-mac ]]; then
+    [[ $# -eq 1 ]] || die 'Use --eth-mac without additional arguments.'
+    show_eth_mac
+    return
+  fi
   [[ -z "${1:-}" || "$1" == --fbi-share-only ]] || die 'Unknown option. Use --help.'
   # Keep prompts working when launched from a download command or SSH.
   exec </dev/tty

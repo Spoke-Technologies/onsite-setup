@@ -70,6 +70,19 @@ AWS or redeploy the agent. Keep the folder/database paths configured on your age
 curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh --fbi-share-only
 ```
 
+### Fetch the Ethernet MAC address
+
+Run this on the Pi to display its `eth0` MAC address, for example for venue network
+registration. It works before or after deployment, without sudo, AWS sign-in or
+any setup changes. The Ethernet cable does not need to be connected.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh --eth-mac
+```
+
+The output is `Ethernet MAC (eth0): <mac-address>`. A missing interface or invalid
+address reports an error and exits unsuccessfully.
+
 Non-secret answers are saved in `~/.config/spoke-onsite/setup.env`. The private key
 is sent to the device's Greengrass configuration; its temporary deployment file is
 removed on exit. AWS CLI keeps its normal SSO cache. No credentials are embedded here.

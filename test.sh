@@ -4,6 +4,28 @@ cd "$(dirname "$0")"
 bash -n install.sh
 source ./install.sh
 
+# The read-only option must return before opening /dev/tty or starting setup.
+(
+  cat() {
+    [[ $# -eq 1 && "$1" == /sys/class/net/eth0/address ]] || return 1
+    printf '%s\n' "$TEST_MAC"
+  }
+  [[ $(TEST_MAC=dc:a6:32:01:23:45 main --eth-mac </dev/null) == 'Ethernet MAC (eth0): dc:a6:32:01:23:45' ]]
+  for TEST_MAC in '' invalid dc:a6:32:01:23 00:00:00:00:00:00 $'dc:a6:32:01:23:45\nextra'; do
+    if (main --eth-mac </dev/null) >/dev/null 2>&1; then
+      echo 'Accepted an invalid Ethernet MAC address' >&2; exit 1
+    fi
+  done
+  if (main --eth-mac extra) >/dev/null 2>&1; then
+    echo 'Accepted extra MAC option arguments' >&2; exit 1
+  fi
+  cat() { return 1; }
+  if (main --eth-mac </dev/null) >/dev/null 2>&1; then
+    echo 'Reported success for a missing Ethernet interface' >&2; exit 1
+  fi
+  [[ $(main --help) == *--eth-mac* ]]
+)
+
 # Use the real CLI against an isolated config: no sign-in or AWS requests.
 if command -v aws >/dev/null; then
   (
