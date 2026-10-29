@@ -502,15 +502,26 @@ setup_tailscale() {
   say "Tailscale is connected with tag:restricted. Remote access IP: $ip"
 }
 
+open_hostname_config() {
+  command -v raspi-config >/dev/null || die 'raspi-config is required. Install it with sudo apt-get install raspi-config.'
+  TOTAL_STAGES=1
+  stage 'Change the Pi hostname'
+  step 'Choose System Options > Hostname, enter the new hostname, then select Finish.'
+  note 'If you choose to reboot, SSH will disconnect. Reconnect using the Pi IP address or its new hostname.'
+  pause 'Press Enter to open raspi-config.'
+  sudo raspi-config || die 'raspi-config exited unsuccessfully.'
+}
+
 main() {
-  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only | --eth-mac | --tailscale-only] — deploy a new Pi, add Samba/route, show the eth0 MAC, or set up Tailscale with tag:restricted'; return; }
+  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only | --eth-mac | --tailscale-only | --hostname-only] — deploy a new Pi, add Samba/route, show the eth0 MAC, set up Tailscale, or open raspi-config to change the hostname'; return; }
   if [[ "${1:-}" == --eth-mac ]]; then
     [[ $# -eq 1 ]] || die 'Use --eth-mac without additional arguments.'
     show_eth_mac
     return
   fi
-  [[ -z "${1:-}" || "$1" == --fbi-share-only || "$1" == --tailscale-only ]] || die 'Unknown option. Use --help.'
+  [[ -z "${1:-}" || "$1" == --fbi-share-only || "$1" == --tailscale-only || "$1" == --hostname-only ]] || die 'Unknown option. Use --help.'
   [[ "${1:-}" != --tailscale-only || $# -eq 1 ]] || die 'Use --tailscale-only without additional arguments.'
+  [[ "${1:-}" != --hostname-only || $# -eq 1 ]] || die 'Use --hostname-only without additional arguments.'
   # Keep prompts working when launched from a download command or SSH.
   exec </dev/tty
   [[ $EUID -ne 0 ]] || die 'Run as your normal Pi user; the wizard uses sudo when needed.'
@@ -518,6 +529,10 @@ main() {
   command -v apt-get >/dev/null || die 'A Debian-based OS is required.'
   [[ -d /run/systemd/system ]] || die 'systemd must be running.'
   sudo -v
+  if [[ "${1:-}" == --hostname-only ]]; then
+    open_hostname_config
+    return
+  fi
   if [[ "${1:-}" != --fbi-share-only && "${1:-}" != --tailscale-only ]]; then
     [[ ! -e /greengrass/v2 ]] || die 'Greengrass already exists. Use --fbi-share-only to add Samba/route without redeploying.'
   fi

@@ -85,6 +85,33 @@ source ./install.sh
   [[ $(main --help) == *--tailscale-only* ]]
 )
 
+# The hostname option delegates to Raspberry Pi OS's interactive tool.
+(
+  test_dir=$(mktemp -d)
+  trap 'rm -rf -- "$test_dir"' EXIT
+  missing=0 tool_status=0
+  command() {
+    if [[ "$*" == '-v raspi-config' ]]; then return "$missing"; fi
+    builtin command "$@"
+  }
+  pause() { :; }
+  sudo() {
+    [[ "$*" == raspi-config ]] || return 1
+    echo raspi-config >>"$test_dir/calls"
+    return "$tool_status"
+  }
+  open_hostname_config >/dev/null
+  [[ $(cat "$test_dir/calls") == raspi-config ]]
+  tool_status=1
+  if (open_hostname_config) >/dev/null 2>&1; then echo 'Ignored raspi-config failure' >&2; exit 1; fi
+  rm "$test_dir/calls"
+  missing=1
+  if (open_hostname_config) >/dev/null 2>&1; then echo 'Ignored missing raspi-config' >&2; exit 1; fi
+  [[ ! -f "$test_dir/calls" ]]
+  if (main --hostname-only extra </dev/null) >/dev/null 2>&1; then exit 1; fi
+  [[ $(main --help) == *--hostname-only* ]]
+)
+
 # Use the real CLI against an isolated config: no sign-in or AWS requests.
 if command -v aws >/dev/null; then
   (
