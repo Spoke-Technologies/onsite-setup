@@ -114,6 +114,22 @@ and does not provision AWS or redeploy the agent. Existing custom Tailscale
 settings are not reset: if the CLI asks you to include existing flags, follow its
 printed command before rerunning the wizard.
 
+### Change the Pi hostname
+
+Open Raspberry Pi OS's own configuration tool from the wizard:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh --hostname-only
+```
+
+Choose **System Options > Hostname**, enter the new name, then select **Finish**.
+You can also open the same tool directly over SSH with `sudo raspi-config`.
+The tool handles hostname validation and the system configuration files. If you
+choose to reboot, SSH disconnects; reconnect using the Pi's IP address or its new
+hostname. This works before or after deployment and opens the tool without
+running AWS, Greengrass or Tailscale setup. Changing the OS hostname does not
+rename the device's AWS IoT thing or a manually configured Tailscale name.
+
 Full deployment refuses existing local Greengrass installations and existing AWS device
 names; use `--fbi-share-only` for an already-deployed Pi. If provisioning partially fails, inspect the existing device before retrying;
 it never deletes or replaces an installation. Logs:
