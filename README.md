@@ -46,15 +46,11 @@ Samba settings are retained, and `smb.conf` is backed up before the managed FBI 
 is installed. Firewall settings are not changed. Passwords are entered invisibly
 and are not saved in the wizard's answers file.
 
-For the route, enter the destination network IP, subnet mask (or prefix length),
-gateway IP and interface. Leave the destination blank if no route is needed. The
-wizard saves the route on that interface's active NetworkManager connection and
-applies it without disconnecting the interface. For example:
-
-```bash
-sudo nmcli connection modify uuid <connection-uuid> +ipv4.routes "10.128.211.0/24 192.168.70.225"
-sudo nmcli device reapply eth0
-```
+For the optional route prompts, use the values from the venue's supplied Windows
+route command as explained in [Add a persistent route](#add-a-persistent-route).
+Leave the destination blank if no route is needed. The wizard saves the route on
+the selected interface's active NetworkManager connection and applies it with
+`nmcli device reapply`.
 
 Configure a MAX Gaming source with FBI live transport in Hub. Connect from Windows
 to `\\<Pi-IP>\fbi` with the Samba username/password. Configure MAX to write
@@ -69,6 +65,61 @@ AWS or redeploy the agent. Keep the folder/database paths configured on your age
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh --fbi-share-only
 ```
+
+### Add a persistent route
+
+If the venue gives you a Windows command such as:
+
+```text
+route add -p 10.128.26.0 mask 255.255.255.0 192.168.0.254
+```
+
+Use these values in the Pi wizard or standalone command:
+
+| Supplied value | Meaning | Pi wizard prompt |
+| --- | --- | --- |
+| `10.128.26.0` | Destination network to reach | Destination network |
+| `255.255.255.0` | Subnet mask, equivalent to prefix length `24` | Subnet mask or prefix length |
+| `192.168.0.254` | Gateway on the Pi's local network | Gateway IP |
+| `-p` | Keep the route after reboot | Automatic with this command |
+
+Run this on the Pi, before or after agent deployment:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh --route-add 10.128.26.0 255.255.255.0 192.168.0.254 eth0
+```
+
+The argument order is `--route-add NETWORK MASK GATEWAY INTERFACE`. Enter only
+the values; omit the Windows words `route add -p` and `mask`. You can use `24`
+instead of `255.255.255.0`. Replace `eth0` with the connected interface that can
+reach the gateway, for example `wlan0` for Wi-Fi. Check interfaces and addresses:
+
+```bash
+nmcli device status
+ip -4 address show dev eth0
+```
+
+This example sends traffic for `10.128.26.0/24` through `192.168.0.254`. The
+gateway must be reachable on the selected interface's local network. The command
+requires Python 3, NetworkManager and sudo. It saves the route in the interface's
+active connection profile, adds it alongside existing routes, and applies it
+immediately without taking the interface down. The route persists when that
+profile reconnects, including after reboot. Repeating the same route does not add
+duplicates. It does not provision AWS, configure Samba or redeploy the agent.
+See the [NetworkManager command reference](https://networkmanager.dev/docs/api/latest/nmcli.html).
+
+Verify the route and the path to an address inside the destination network:
+
+```bash
+ip -4 route show 10.128.26.0/24
+ip -4 route get 10.128.26.1
+```
+
+The selected path should include `via 192.168.0.254 dev eth0`. Use an actual
+venue server IP when checking its path. A saved route does not prove that the
+server is online or that the venue firewall allows access. If saving succeeds
+but applying fails, the command reports that separately; fix the reported error
+and rerun it.
 
 ### Map a hostname to a local IP when DNS is unavailable
 

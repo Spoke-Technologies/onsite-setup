@@ -66,6 +66,58 @@ PY
   [[ $(main --help) == *--host-map* ]]
 )
 
+# Add a route without touching real NetworkManager profiles or requiring a tty.
+(
+  route_test_dir=$(mktemp -d)
+  trap 'rm -rf -- "$route_test_dir"' EXIT
+  export route_test_dir ROUTE_TEST_FAIL='' ROUTE_TEST_UUID=12345678-1234-1234-1234-123456789abc ROUTE_TEST_DEVICE=eth0
+  uname() { echo Linux; }
+  nmcli() {
+    printf 'query %s\n' "$*" >>"$route_test_dir/calls"
+    [[ "$ROUTE_TEST_FAIL" != lookup ]] || return 1
+    [[ "$*" == "-g GENERAL.CON-UUID device show $ROUTE_TEST_DEVICE" ]] || return 1
+    printf '%s\n' "$ROUTE_TEST_UUID"
+  }
+  sudo() {
+    printf 'sudo %s\n' "$*" >>"$route_test_dir/calls"
+    case "$*" in
+      -v) [[ "$ROUTE_TEST_FAIL" != auth ]] ;;
+      "nmcli connection modify uuid $ROUTE_TEST_UUID +ipv4.routes 10.128.26.0/24 192.168.0.254") [[ "$ROUTE_TEST_FAIL" != save ]] ;;
+      "nmcli device reapply $ROUTE_TEST_DEVICE") [[ "$ROUTE_TEST_FAIL" != apply ]] ;;
+      *) return 1 ;;
+    esac
+  }
+  export -f uname nmcli sudo
+  run_route() {
+    : >"$route_test_dir/calls"
+    bash -c 'source ./install.sh; main --route-add "$@"' _ "$@" </dev/null >"$route_test_dir/output" 2>&1
+  }
+  run_route 10.128.26.0 255.255.255.0 192.168.0.254 eth0
+  [[ $(cat "$route_test_dir/calls") == "query -g GENERAL.CON-UUID device show eth0
+sudo -v
+sudo nmcli connection modify uuid $ROUTE_TEST_UUID +ipv4.routes 10.128.26.0/24 192.168.0.254
+sudo nmcli device reapply eth0" ]]
+  grep -F 'Route saved and applied.' "$route_test_dir/output" >/dev/null
+  ROUTE_TEST_DEVICE=wlan0 run_route 10.128.26.0 24 192.168.0.254 wlan0
+  for args in '10.128.26.1 24 192.168.0.254 eth0' '10.128.26.0 255.0.255.0 192.168.0.254 eth0' '10.128.26.0 24 invalid eth0' '10.128.26.0 24 192.168.0.254 --bad' '10.128.26.0 24 192.168.0.254' '10.128.26.0 24 192.168.0.254 eth0 extra'; do
+    if run_route $args; then echo 'Accepted invalid route arguments' >&2; exit 1; fi
+    [[ ! -s "$route_test_dir/calls" ]]
+  done
+  for ROUTE_TEST_UUID in '' -- 000000000000000000000000000000000000; do
+    if run_route 10.128.26.0 24 192.168.0.254 eth0; then echo 'Accepted an inactive/invalid connection' >&2; exit 1; fi
+    if grep -F 'sudo ' "$route_test_dir/calls"; then exit 1; fi
+  done
+  ROUTE_TEST_UUID=12345678-1234-1234-1234-123456789abc
+  for ROUTE_TEST_FAIL in lookup auth save apply; do
+    if run_route 10.128.26.0 24 192.168.0.254 eth0; then echo "Ignored route failure: $ROUTE_TEST_FAIL" >&2; exit 1; fi
+    if grep -F 'Route saved and applied.' "$route_test_dir/output"; then exit 1; fi
+    if [[ "$ROUTE_TEST_FAIL" == apply ]]; then
+      grep -F 'Route saved, but could not apply' "$route_test_dir/output" >/dev/null
+    elif grep -F 'device reapply' "$route_test_dir/calls"; then exit 1; fi
+  done
+  [[ $(main --help) == *--route-add* ]]
+)
+
 # The read-only option must return before opening /dev/tty or starting setup.
 (
   cat() {
