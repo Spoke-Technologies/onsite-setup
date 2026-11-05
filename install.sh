@@ -187,6 +187,58 @@ finish() {
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; }
 
+render_host_map() {
+  python3 - "$@" <<'PY'
+import ipaddress, pathlib, re, sys
+try:
+    address, hostname, filename = sys.argv[1:]
+    address = str(ipaddress.IPv4Address(address))
+    hostname = hostname.rstrip('.').lower()
+    if len(hostname) > 253 or not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in hostname.split('.')):
+        raise ValueError('Use a hostname such as csc-apigateway.ody.cloud, without https://, a port or a path')
+    output = []
+    for line in pathlib.Path(filename).read_text().splitlines(keepends=True):
+        record, marker, comment = line.partition('#')
+        fields = record.split()
+        if len(fields) > 1 and any(alias.rstrip('.').lower() == hostname for alias in fields[1:]):
+            aliases = [alias for alias in fields[1:] if alias.rstrip('.').lower() != hostname]
+            if aliases:
+                output.append(fields[0] + '\t' + ' '.join(aliases) + (' #' + comment.rstrip('\n') if marker else '') + '\n')
+            elif marker:
+                output.append('#' + comment.rstrip('\n') + '\n')
+        else:
+            output.append(line)
+    result = ''.join(output)
+    if result and not result.endswith('\n'):
+        result += '\n'
+    sys.stdout.write(result + f'{address}\t{hostname}\n')
+except (ValueError, OSError) as error:
+    sys.exit(f'Could not map hostname: {error}')
+PY
+}
+
+setup_host_map() (
+  [[ $(uname -s) == Linux ]] || die 'Run --host-map on the Pi.'
+  command -v python3 >/dev/null || die 'Python 3 is required: sudo apt-get install python3'
+  local directory backup
+  directory=$(mktemp -d)
+  trap 'rm -rf -- "$directory"' EXIT
+  render_host_map "$1" "$2" /etc/hosts >"$directory/hosts"
+  if cmp -s /etc/hosts "$directory/hosts"; then
+    say 'That hostname mapping is already configured.'
+    return
+  fi
+  sudo -v
+  backup=$(sudo mktemp /etc/hosts.spoke-backup.XXXXXX)
+  sudo cp -p /etc/hosts "$backup"
+  if ! sudo cp "$directory/hosts" /etc/hosts; then
+    sudo cp -p "$backup" /etc/hosts || die "Could not restore /etc/hosts; restore it from $backup."
+    die "Could not update /etc/hosts; restored $backup."
+  fi
+  say "Hostname mapping saved in /etc/hosts. Backup: $backup"
+  say 'Keep using the HTTPS hostname. Restart the calling application if it cached the old address.'
+)
+
 show_eth_mac() {
   local mac
   mac=$(cat /sys/class/net/eth0/address 2>/dev/null) || die 'Could not read the Ethernet MAC address from eth0. Run this on the Pi with its Ethernet interface available.'
@@ -503,7 +555,12 @@ setup_tailscale() {
 }
 
 main() {
-  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only | --eth-mac | --tailscale-only] — deploy a new Pi, add Samba/route, show the eth0 MAC, or set up Tailscale with tag:restricted'; return; }
+  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only | --eth-mac | --tailscale-only | --host-map IP HOSTNAME] — deploy a new Pi, add Samba/route, show the eth0 MAC, set up Tailscale with tag:restricted, or map a hostname locally'; return; }
+  if [[ "${1:-}" == --host-map ]]; then
+    [[ $# -eq 3 ]] || die 'Use --host-map IP HOSTNAME (for example --host-map 192.168.5.140 csc-apigateway.ody.cloud).'
+    setup_host_map "$2" "$3"
+    return
+  fi
   if [[ "${1:-}" == --eth-mac ]]; then
     [[ $# -eq 1 ]] || die 'Use --eth-mac without additional arguments.'
     show_eth_mac

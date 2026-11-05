@@ -70,6 +70,34 @@ AWS or redeploy the agent. Keep the folder/database paths configured on your age
 curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh --fbi-share-only
 ```
 
+### Map a hostname to a local IP when DNS is unavailable
+
+Run this on the Pi to make `https://csc-apigateway.ody.cloud` connect to
+`192.168.5.140`, before or after deploying the agent:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh --host-map 192.168.5.140 csc-apigateway.ody.cloud
+```
+
+Use an IPv4 address and a hostname without `https://`, a port or a path. This
+backs up `/etc/hosts`, replaces existing entries for that exact hostname (including
+IPv6 entries), and preserves other hostnames, aliases and comments. Repeating the
+same command does not add duplicate entries. It requires Python 3 and sudo for
+changes, and does not provision AWS or redeploy the agent.
+
+The override persists across reboots and only affects this Pi. Keep using the
+HTTPS URL so the server receives the correct hostname; the server must still
+present a trusted certificate valid for that hostname. Restart the calling
+application if it has cached the old address. To remove the override after DNS
+is fixed, run `sudoedit /etc/hosts` and delete the added hostname entry.
+
+Verify the Pi's system resolver and HTTPS connection:
+
+```bash
+getent ahostsv4 csc-apigateway.ody.cloud
+curl -I --connect-timeout 10 https://csc-apigateway.ody.cloud
+```
+
 ### Fetch the Ethernet MAC address
 
 Run this on the Pi to display its `eth0` MAC address, for example for venue network

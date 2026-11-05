@@ -4,6 +4,68 @@ cd "$(dirname "$0")"
 bash -n install.sh
 source ./install.sh
 
+# Exercise the real command against a temporary hosts file, without sudo or DNS.
+(
+  host_test_dir=$(mktemp -d)
+  trap 'rm -rf -- "$host_test_dir"' EXIT
+  export host_test_dir HOST_TEST_FAIL=''
+  printf '127.0.0.1 localhost\n192.168.5.2 keep CSC-APIGATEWAY.ODY.CLOUD other # venue\n::1 csc-apigateway.ody.cloud # old IPv6\n192.168.5.3 csc-apigateway.ody.cloud.extra\n# retain this comment\n' >"$host_test_dir/hosts"
+  cp "$host_test_dir/hosts" "$host_test_dir/original"
+  uname() { echo Linux; }
+  python3() { command python3 - "$2" "$3" "$host_test_dir/hosts"; }
+  cmp() { command cmp "$1" "$host_test_dir/hosts" "$3"; }
+  sudo() {
+    printf '%s\n' "$*" >>"$host_test_dir/calls"
+    local arg args=()
+    for arg in "$@"; do
+      [[ "$arg" != /etc/hosts ]] || arg="$host_test_dir/hosts"
+      [[ "$arg" != /etc/hosts.spoke-backup.XXXXXX ]] || arg="$host_test_dir/backup.XXXXXX"
+      args+=("$arg")
+    done
+    [[ "$1" != -v ]] || return 0
+    if [[ "$HOST_TEST_FAIL" == backup && "$1 $2" == 'cp -p' ]]; then return 1; fi
+    if [[ "$HOST_TEST_FAIL" == write && "$1" == cp && "$2" != -p ]]; then
+      printf 'partial write\n' >"$host_test_dir/hosts"
+      return 1
+    fi
+    "${args[@]}"
+  }
+  export -f uname python3 cmp sudo
+  run_host_map() { bash -c 'source ./install.sh; main --host-map "$@"' _ "$@" </dev/null >"$host_test_dir/output" 2>&1; }
+  run_host_map 192.168.5.140 csc-apigateway.ody.cloud
+  command cmp "$host_test_dir/original" "$(find "$host_test_dir" -name 'backup.*')"
+  command python3 - "$host_test_dir/hosts" <<'PY'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+assert text == ('127.0.0.1 localhost\n192.168.5.2\tkeep other # venue\n'
+                '# old IPv6\n192.168.5.3 csc-apigateway.ody.cloud.extra\n'
+                '# retain this comment\n192.168.5.140\tcsc-apigateway.ody.cloud\n')
+PY
+  cp "$host_test_dir/hosts" "$host_test_dir/expected"
+  rm "$host_test_dir/calls"
+  run_host_map 192.168.5.140 CSC-APIGATEWAY.ODY.CLOUD.
+  command cmp "$host_test_dir/expected" "$host_test_dir/hosts"
+  [[ ! -e "$host_test_dir/calls" ]]
+  for hostname in '' https://csc-apigateway.ody.cloud 'bad host' '-bad.example' 'a..example' $'bad\nexample' 'example:443'; do
+    if run_host_map 192.168.5.140 "$hostname"; then echo 'Accepted invalid hostname' >&2; exit 1; fi
+  done
+  for address in '' 999.1.1.1 192.168.5.140/24 '192.168.5.140 extra'; do
+    if run_host_map "$address" csc-apigateway.ody.cloud; then echo 'Accepted invalid IP' >&2; exit 1; fi
+  done
+  if run_host_map 192.168.5.140; then exit 1; fi
+  if run_host_map 192.168.5.140 csc-apigateway.ody.cloud extra; then exit 1; fi
+  [[ ! -e "$host_test_dir/calls" ]]
+  for HOST_TEST_FAIL in backup write; do
+    if run_host_map 192.168.5.141 csc-apigateway.ody.cloud; then echo 'Ignored hosts write failure' >&2; exit 1; fi
+    command cmp "$host_test_dir/expected" "$host_test_dir/hosts"
+  done
+  HOST_TEST_FAIL=''
+  printf '127.0.0.1 localhost' >"$host_test_dir/hosts"
+  run_host_map 192.168.5.141 csc-apigateway.ody.cloud
+  [[ $(cat "$host_test_dir/hosts") == $'127.0.0.1 localhost\n192.168.5.141\tcsc-apigateway.ody.cloud' ]]
+  [[ $(main --help) == *--host-map* ]]
+)
+
 # The read-only option must return before opening /dev/tty or starting setup.
 (
   cat() {
