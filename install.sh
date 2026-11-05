@@ -187,6 +187,58 @@ finish() {
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; }
 
+render_host_map() {
+  python3 - "$@" <<'PY'
+import ipaddress, pathlib, re, sys
+try:
+    address, hostname, filename = sys.argv[1:]
+    address = str(ipaddress.IPv4Address(address))
+    hostname = hostname.rstrip('.').lower()
+    if len(hostname) > 253 or not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in hostname.split('.')):
+        raise ValueError('Use a hostname such as csc-apigateway.ody.cloud, without https://, a port or a path')
+    output = []
+    for line in pathlib.Path(filename).read_text().splitlines(keepends=True):
+        record, marker, comment = line.partition('#')
+        fields = record.split()
+        if len(fields) > 1 and any(alias.rstrip('.').lower() == hostname for alias in fields[1:]):
+            aliases = [alias for alias in fields[1:] if alias.rstrip('.').lower() != hostname]
+            if aliases:
+                output.append(fields[0] + '\t' + ' '.join(aliases) + (' #' + comment.rstrip('\n') if marker else '') + '\n')
+            elif marker:
+                output.append('#' + comment.rstrip('\n') + '\n')
+        else:
+            output.append(line)
+    result = ''.join(output)
+    if result and not result.endswith('\n'):
+        result += '\n'
+    sys.stdout.write(result + f'{address}\t{hostname}\n')
+except (ValueError, OSError) as error:
+    sys.exit(f'Could not map hostname: {error}')
+PY
+}
+
+setup_host_map() (
+  [[ $(uname -s) == Linux ]] || die 'Run --host-map on the Pi.'
+  command -v python3 >/dev/null || die 'Python 3 is required: sudo apt-get install python3'
+  local directory backup
+  directory=$(mktemp -d)
+  trap 'rm -rf -- "$directory"' EXIT
+  render_host_map "$1" "$2" /etc/hosts >"$directory/hosts"
+  if cmp -s /etc/hosts "$directory/hosts"; then
+    say 'That hostname mapping is already configured.'
+    return
+  fi
+  sudo -v
+  backup=$(sudo mktemp /etc/hosts.spoke-backup.XXXXXX)
+  sudo cp -p /etc/hosts "$backup"
+  if ! sudo cp "$directory/hosts" /etc/hosts; then
+    sudo cp -p "$backup" /etc/hosts || die "Could not restore /etc/hosts; restore it from $backup."
+    die "Could not update /etc/hosts; restored $backup."
+  fi
+  say "Hostname mapping saved in /etc/hosts. Backup: $backup"
+  say 'Keep using the HTTPS hostname. Restart the calling application if it cached the old address.'
+)
+
 show_eth_mac() {
   local mac
   mac=$(cat /sys/class/net/eth0/address 2>/dev/null) || die 'Could not read the Ethernet MAC address from eth0. Run this on the Pi with its Ethernet interface available.'
@@ -249,6 +301,36 @@ except ValueError as error:
 PY
 }
 
+route_connection() {
+  [[ "$1" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.:-]*$ ]] || die 'Invalid network interface.'
+  local connection
+  connection=$(nmcli -g GENERAL.CON-UUID device show "$1") || return 1
+  [[ "$connection" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] ||
+    die 'Choose an interface with an active NetworkManager connection. Run: nmcli device status'
+  printf '%s\n' "$connection"
+}
+
+apply_route() {
+  sudo nmcli connection modify uuid "$FBI_ROUTE_CONNECTION" +ipv4.routes "$FBI_ROUTE_CIDR $FBI_ROUTE_GATEWAY" ||
+    die 'Could not save the route in NetworkManager.'
+  sudo nmcli device reapply "$FBI_ROUTE_DEVICE" ||
+    die 'Route saved, but could not apply it to the active interface. Fix the reported error and rerun the command.'
+}
+
+setup_route() {
+  [[ $(uname -s) == Linux ]] || die 'Run --route-add on the Pi.'
+  command -v python3 >/dev/null || die 'Python 3 is required: sudo apt-get install python3'
+  command -v nmcli >/dev/null || die 'NetworkManager (nmcli) is required to save the route.'
+  local FBI_ROUTE_NETWORK="$1" FBI_ROUTE_MASK="$2" FBI_ROUTE_GATEWAY="$3" FBI_ROUTE_DEVICE="$4"
+  local FBI_ROUTE_CIDR FBI_ROUTE_CONNECTION
+  FBI_ROUTE_CIDR=$(route_cidr) || return 1
+  FBI_ROUTE_CONNECTION=$(route_connection "$FBI_ROUTE_DEVICE") || return 1
+  say "Add persistent route: $FBI_ROUTE_CIDR via $FBI_ROUTE_GATEWAY on $FBI_ROUTE_DEVICE."
+  sudo -v
+  apply_route
+  say 'Route saved and applied. It will return when this connection activates, including after reboot.'
+}
+
 prompt_fbi_samba() {
   ask FBI_SAMBA_USER 'Samba login username [FBI]:'
   FBI_SAMBA_USER=${FBI_SAMBA_USER:-FBI}
@@ -274,18 +356,17 @@ prompt_fbi_samba() {
   esac
   write_env FBI_SAMBA_USER "$FBI_SAMBA_USER"
   write_env MAX_FBI_WATCH_DIR "$MAX_FBI_WATCH_DIR"
-  ask FBI_ROUTE_NETWORK 'Route destination network IP (blank to skip):'
+  note 'For route add -p 10.128.26.0 mask 255.255.255.0 192.168.0.254, enter destination 10.128.26.0, mask 255.255.255.0 and gateway 192.168.0.254.'
+  ask FBI_ROUTE_NETWORK 'Destination network (the IP after route add -p; blank to skip):'
   if [[ -n "$FBI_ROUTE_NETWORK" ]]; then
     command -v nmcli >/dev/null || die 'NetworkManager (nmcli) is required to save the route.'
     ask FBI_ROUTE_MASK 'Subnet mask or prefix length [255.255.255.0]:'
     FBI_ROUTE_MASK=${FBI_ROUTE_MASK:-255.255.255.0}
-    ask FBI_ROUTE_GATEWAY 'Gateway IP:'
+    ask FBI_ROUTE_GATEWAY 'Gateway IP (the last IP in the supplied route command):'
     FBI_ROUTE_CIDR=$(route_cidr) || return 1
     nmcli -f DEVICE,STATE,CONNECTION device status
     ask FBI_ROUTE_DEVICE 'Network interface for this route (for example eth0):'
-    [[ "$FBI_ROUTE_DEVICE" =~ ^[a-zA-Z0-9_.:-]+$ ]] || die 'Invalid network interface.'
-    FBI_ROUTE_CONNECTION=$(nmcli -g GENERAL.CON-UUID device show "$FBI_ROUTE_DEVICE")
-    [[ "$FBI_ROUTE_CONNECTION" =~ ^[0-9a-fA-F-]{36}$ ]] || die 'Choose an interface with an active NetworkManager connection.'
+    FBI_ROUTE_CONNECTION=$(route_connection "$FBI_ROUTE_DEVICE") || return 1
     local field
     for field in FBI_ROUTE_NETWORK FBI_ROUTE_MASK FBI_ROUTE_GATEWAY FBI_ROUTE_DEVICE; do
       write_env "$field" "${!field}"
@@ -352,8 +433,7 @@ setup_fbi_samba() {
   sudo systemctl enable smbd
   prepare_fbi_access
   if [[ -n "${FBI_ROUTE_NETWORK:-}" ]]; then
-    sudo nmcli connection modify uuid "$FBI_ROUTE_CONNECTION" +ipv4.routes "$FBI_ROUTE_CIDR $FBI_ROUTE_GATEWAY"
-    sudo nmcli device reapply "$FBI_ROUTE_DEVICE"
+    apply_route
   fi
   say "Samba ready: \\\\<Pi-IP>\\fbi — username $FBI_SAMBA_USER."
   say "Reconnect your SSH session to pick up $(id -un)'s new group membership."
@@ -503,7 +583,17 @@ setup_tailscale() {
 }
 
 main() {
-  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only | --eth-mac | --tailscale-only] — deploy a new Pi, add Samba/route, show the eth0 MAC, or set up Tailscale with tag:restricted'; return; }
+  [[ "${1:-}" != --help ]] || { echo 'Usage: bash install.sh [--fbi-share-only | --eth-mac | --tailscale-only | --host-map IP HOSTNAME | --route-add NETWORK MASK GATEWAY INTERFACE] — deploy a new Pi, add Samba/route, show the eth0 MAC, set up Tailscale with tag:restricted, map a hostname locally, or add a persistent route'; return; }
+  if [[ "${1:-}" == --route-add ]]; then
+    [[ $# -eq 5 ]] || die 'Use --route-add NETWORK MASK GATEWAY INTERFACE (for example --route-add 10.128.26.0 255.255.255.0 192.168.0.254 eth0).'
+    setup_route "$2" "$3" "$4" "$5"
+    return
+  fi
+  if [[ "${1:-}" == --host-map ]]; then
+    [[ $# -eq 3 ]] || die 'Use --host-map IP HOSTNAME (for example --host-map 192.168.5.140 csc-apigateway.ody.cloud).'
+    setup_host_map "$2" "$3"
+    return
+  fi
   if [[ "${1:-}" == --eth-mac ]]; then
     [[ $# -eq 1 ]] || die 'Use --eth-mac without additional arguments.'
     show_eth_mac
