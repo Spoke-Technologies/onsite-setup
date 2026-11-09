@@ -267,14 +267,50 @@ done
   config_dir=$(mktemp -d)
   trap 'rm -rf -- "$config_dir"' EXIT
   printf '[global]\nworkgroup = EXISTING\n[other]\npath = /srv/other\n' >"$config_dir/original"
-  MAX_FBI_WATCH_DIR='/srv/custom FBI' FBI_GROUP=venue-fbi
+  MAX_FBI_WATCH_DIR='/srv/custom FBI' FBI_GROUP=venue-fbi FBI_SHARE_NAME=fbi
   render_samba_config "$config_dir/original" >"$config_dir/first"
+  grep -Fx '[fbi]' "$config_dir/first" >/dev/null
+  FBI_SHARE_NAME=SPOKE-FBI
   render_samba_config "$config_dir/first" >"$config_dir/second"
+  render_samba_config "$config_dir/second" >"$config_dir/third"
+  [[ $(grep -c '^\[SPOKE-FBI\]$' "$config_dir/third") == 1 ]]
   [[ $(grep -c '^# BEGIN SPOKE FBI$' "$config_dir/second") == 1 ]]
+  grep -Fx '[SPOKE-FBI]' "$config_dir/second" >/dev/null
+  if grep -Fx '[fbi]' "$config_dir/second"; then exit 1; fi
+  grep -Fx '[other]' "$config_dir/second" >/dev/null
   grep -Fx 'workgroup = EXISTING' "$config_dir/second" >/dev/null
   grep -Fx '   server min protocol = NT1' "$config_dir/second" >/dev/null
   grep -Fx '   path = /srv/custom FBI' "$config_dir/second" >/dev/null
   grep -Fx '   valid users = @venue-fbi' "$config_dir/second" >/dev/null
+  if (FBI_SHARE_NAME=OTHER render_samba_config "$config_dir/original") >"$config_dir/collision" 2>/dev/null; then
+    echo 'Overwrote an unrelated share' >&2; exit 1
+  fi
+  [[ ! -s "$config_dir/collision" ]]
+)
+
+# Exercise the shared prompt without Samba, sudo or a real venue route.
+(
+  config_dir=$(mktemp -d)
+  trap 'rm -rf -- "$config_dir"' EXIT
+  ENV_FILE="$config_dir/answers"
+  MAX_FBI_WATCH_DIR=/srv/samba/fbi FBI_GROUP=fbi
+  getent() { return 1; }
+  realpath() { printf '%s\n' "${@: -1}"; }
+  prompt_fbi_samba <<< $'\n\ntest-password\ntest-password\n' >/dev/null
+  [[ "$FBI_SHARE_NAME" == fbi ]]
+  [[ $(_existing FBI_SHARE_NAME) == fbi ]]
+  prompt_fbi_samba <<< $'SPOKE-FBI\n\ntest-password\ntest-password\n' >"$config_dir/output"
+  [[ "$FBI_SHARE_NAME" == SPOKE-FBI ]]
+  [[ $(_existing FBI_SHARE_NAME) == SPOKE-FBI ]]
+  grep -F '\\<Pi-IP>\SPOKE-FBI' "$config_dir/output" >/dev/null
+  prompt_fbi_samba <<< $'\n\ntest-password\ntest-password\n' >/dev/null
+  [[ "$FBI_SHARE_NAME" == SPOKE-FBI ]]
+  for share in 'bad name' '/SPOKE-FBI' 'bad\name' 'bad]' 'bad#name' 'bad;name' $'bad\rname' '-bad' global GLOBAL homes HoMeS printers IPC\$ "$(printf '%081d' 0)"; do
+    if (prompt_fbi_samba <<< "$share") >/dev/null 2>&1; then
+      echo "Accepted invalid share name: $share" >&2; exit 1
+    fi
+    [[ $(_existing FBI_SHARE_NAME) == SPOKE-FBI ]]
+  done
 )
 
 export THING_NAME=spoke-test THING_ARN=arn:aws:iot:ap-southeast-2:123456789012:thing/spoke-test

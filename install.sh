@@ -272,7 +272,7 @@ configure_transport() {
       write_env FBI_GROUP "$FBI_GROUP"
       write_env MAX_FBI_LOCAL_DB_PATH "$MAX_FBI_LOCAL_DB_PATH"
       say "Will add ggc_user to $FBI_GROUP and create the group/folder if missing."
-      say 'Samba will share this folder as fbi. Configure MAX to write FBI.csv and FBI.sem here.'
+      say 'Choose the Windows share name next. Configure MAX to write FBI.csv and FBI.sem here.'
       ;;
     *) die 'Choose iot or fbi.' ;;
   esac
@@ -332,6 +332,14 @@ setup_route() {
 }
 
 prompt_fbi_samba() {
+  ask FBI_SHARE_NAME 'Windows share name (for example SPOKE-FBI) [fbi]:'
+  FBI_SHARE_NAME=${FBI_SHARE_NAME:-fbi}
+  [[ "$FBI_SHARE_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$ ]] ||
+    die 'Use 1–80 letters, digits, underscores or hyphens, starting with a letter or digit.'
+  case "$FBI_SHARE_NAME" in
+    [Gg][Ll][Oo][Bb][Aa][Ll]|[Hh][Oo][Mm][Ee][Ss]|[Pp][Rr][Ii][Nn][Tt][Ee][Rr][Ss]) die 'Choose a non-reserved Samba share name.' ;;
+  esac
+  write_env FBI_SHARE_NAME "$FBI_SHARE_NAME"
   ask FBI_SAMBA_USER 'Samba login username [FBI]:'
   FBI_SAMBA_USER=${FBI_SAMBA_USER:-FBI}
   [[ "$FBI_SAMBA_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$ ]] || die 'Invalid Samba username.'
@@ -372,10 +380,14 @@ prompt_fbi_samba() {
       write_env "$field" "${!field}"
     done
   fi
-  say "Will share $MAX_FBI_WATCH_DIR as \\fbi, enable SMBv1 and add $(id -un), ggc_user and $FBI_SAMBA_USER to $FBI_GROUP."
+  say "Will share $MAX_FBI_WATCH_DIR as \\\\<Pi-IP>\\$FBI_SHARE_NAME, enable SMBv1 and add $(id -un), ggc_user and $FBI_SAMBA_USER to $FBI_GROUP."
 }
 
 render_samba_config() {
+  if sed '/^# BEGIN SPOKE FBI$/,/^# END SPOKE FBI$/d' "$1" |
+    grep -Ei "^[[:space:]]*\[[[:space:]]*$FBI_SHARE_NAME[[:space:]]*\]" >/dev/null; then
+    die "Share $FBI_SHARE_NAME already exists outside the managed FBI block; choose another name."
+  fi
   # Replace only our block; retain existing shares and unrelated configuration.
   sed '/^# BEGIN SPOKE FBI$/,/^# END SPOKE FBI$/d' "$1"
   cat <<EOF
@@ -386,7 +398,7 @@ render_samba_config() {
    client min protocol = NT1
    ntlm auth = yes
 
-[fbi]
+[$FBI_SHARE_NAME]
    path = $MAX_FBI_WATCH_DIR
    browseable = yes
    read only = no
@@ -435,7 +447,7 @@ setup_fbi_samba() {
   if [[ -n "${FBI_ROUTE_NETWORK:-}" ]]; then
     apply_route
   fi
-  say "Samba ready: \\\\<Pi-IP>\\fbi — username $FBI_SAMBA_USER."
+  say "Samba ready: \\\\<Pi-IP>\\$FBI_SHARE_NAME — username $FBI_SAMBA_USER."
   say "Reconnect your SSH session to pick up $(id -un)'s new group membership."
 }
 
