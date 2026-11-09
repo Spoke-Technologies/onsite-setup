@@ -35,8 +35,11 @@ FBI prompts default to:
 - Linux group: `fbi`
 - Local database: `/var/lib/spoke-onsite/max-fbi-agent.sqlite`
 
-All three can be changed. FBI setup also installs Samba and prompts for a dedicated
-login username (default `FBI`) and password. It shares the selected folder as `fbi`,
+All three can be changed. FBI setup also installs Samba and prompts for a Windows
+share name (default `fbi`), a dedicated login username (default `FBI`) and password.
+The share name accepts 1–80 letters, digits, underscores or hyphens, starting with a
+letter or digit; reserved names and names used by unrelated shares are rejected.
+It shares the selected folder under that name,
 enables SMBv1 (`NT1`) and NTLM authentication, and adds the Samba user, `ggc_user`
 and the current login user (normally `spoke`) to the selected group.
 
@@ -53,7 +56,10 @@ the selected interface's active NetworkManager connection and applies it with
 `nmcli device reapply`.
 
 Configure a MAX Gaming source with FBI live transport in Hub. Connect from Windows
-to `\\<Pi-IP>\fbi` with the Samba username/password. Configure MAX to write
+to `\\<Pi-IP>\<share-name>` with the Samba username/password. For example, enter
+`SPOKE-FBI` at the Windows share name prompt to use `\\<Pi-IP>\SPOKE-FBI`.
+The local folder can stay `/srv/samba/fbi`; it is separate from the share name.
+Configure MAX to write
 `FBI.csv` and `FBI.sem`, then verify an export reaches Hub. Reconnect SSH to pick up
 the current user's new Linux group membership.
 
@@ -61,6 +67,9 @@ the current user's new Linux group membership.
 
 This only configures the local share, group access and route; it does not provision
 AWS or redeploy the agent. Keep the folder/database paths configured on your agent.
+You can also use it to rename the managed share: enter the new Windows share name
+and reconnect Windows/MAX using that name. The previous managed share name is
+replaced, and the chosen name is saved for future runs (Enter keeps the saved name).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Spoke-Technologies/onsite-setup/main/install.sh -o onsite-setup.sh && bash onsite-setup.sh --fbi-share-only

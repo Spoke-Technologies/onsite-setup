@@ -16,7 +16,7 @@ set -euo pipefail
 source /src/install.sh
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
-FBI_SAMBA_USER=FBI FBI_SAMBA_PASSWORD=test-only-password FBI_GROUP=venue-fbi
+FBI_SHARE_NAME=fbi FBI_SAMBA_USER=FBI FBI_SAMBA_PASSWORD=test-only-password FBI_GROUP=venue-fbi
 MAX_FBI_WATCH_DIR='/srv/samba/custom FBI'
 MAX_FBI_LOCAL_DB_PATH=/var/lib/spoke-onsite/max-fbi-agent.sqlite
 FBI_ROUTE_NETWORK=10.128.211.0 FBI_ROUTE_MASK=255.255.255.0 FBI_ROUTE_GATEWAY=192.168.70.225
@@ -24,12 +24,14 @@ FBI_ROUTE_CIDR=$(route_cidr)
 FBI_ROUTE_CONNECTION=12345678-1234-1234-1234-123456789abc FBI_ROUTE_DEVICE=eth0
 setup_fbi_samba
 [[ -z ${FBI_SAMBA_PASSWORD+x} ]]
-# Reapply the config to verify existing accounts and the managed block are reusable.
-FBI_SAMBA_PASSWORD=test-only-password
+# Rename the share to verify existing accounts and the managed block are reusable.
+FBI_SHARE_NAME=SPOKE-FBI FBI_SAMBA_PASSWORD=test-only-password
 setup_fbi_samba
 BASH
 testparm -s /etc/samba/smb.conf >/dev/null
 [[ $(grep -c '^# BEGIN SPOKE FBI$' /etc/samba/smb.conf) == 1 ]]
+grep -Fx '[SPOKE-FBI]' /etc/samba/smb.conf >/dev/null
+if grep -Fx '[fbi]' /etc/samba/smb.conf; then exit 1; fi
 for user in spoke ggc_user FBI; do
   id -nG "$user" | tr ' ' '\n' | grep -Fx venue-fbi >/dev/null
 done
@@ -40,7 +42,7 @@ smbd -D
 umask 077
 printf 'username = FBI\npassword = test-only-password\n' >/tmp/smb-auth
 printf 'test FBI export\n' >/tmp/export.csv
-smbclient //127.0.0.1/fbi -A /tmp/smb-auth -m NT1 --option='client min protocol=NT1' \
+smbclient //127.0.0.1/SPOKE-FBI -A /tmp/smb-auth -m NT1 --option='client min protocol=NT1' \
   -c 'put /tmp/export.csv FBI.csv; put /tmp/export.csv FBI.sem'
 [[ $(stat -c %a '/srv/samba/custom FBI/FBI.csv') == 660 ]]
 runuser -u ggc_user -- cat '/srv/samba/custom FBI/FBI.csv'
