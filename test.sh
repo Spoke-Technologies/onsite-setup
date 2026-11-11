@@ -12,14 +12,16 @@ source ./install.sh
   printf '127.0.0.1 localhost\n192.168.5.2 keep CSC-APIGATEWAY.ODY.CLOUD other # venue\n::1 csc-apigateway.ody.cloud # old IPv6\n192.168.5.3 csc-apigateway.ody.cloud.extra\n# retain this comment\n' >"$host_test_dir/hosts"
   cp "$host_test_dir/hosts" "$host_test_dir/original"
   uname() { echo Linux; }
-  python3() { command python3 - "$2" "$3" "$host_test_dir/hosts"; }
-  cmp() { command cmp "$1" "$host_test_dir/hosts" "$3"; }
+  python3() { command python3 - "$2" "$3" "$host_test_dir/${4##*/}"; }
+  cmp() { command cmp "$1" "$host_test_dir/${2##*/}" "$3"; }
+  grep() { command grep "$1" "$2" "$host_test_dir/${3##*/}"; }
   sudo() {
     printf '%s\n' "$*" >>"$host_test_dir/calls"
     local arg args=()
     for arg in "$@"; do
       [[ "$arg" != /etc/hosts ]] || arg="$host_test_dir/hosts"
       [[ "$arg" != /etc/hosts.spoke-backup.XXXXXX ]] || arg="$host_test_dir/backup.XXXXXX"
+      [[ "$arg" != /etc/cloud/templates/* ]] || arg="$host_test_dir/${arg##*/}"
       args+=("$arg")
     done
     [[ "$1" != -v ]] || return 0
@@ -28,9 +30,13 @@ source ./install.sh
       printf 'partial write\n' >"$host_test_dir/hosts"
       return 1
     fi
+    if [[ "$HOST_TEST_FAIL" == template && "$1" == cp && "$2" != -p && "$3" == /etc/cloud/templates/hosts.debian.tmpl ]]; then
+      printf 'partial write\n' >"$host_test_dir/hosts.debian.tmpl"
+      return 1
+    fi
     "${args[@]}"
   }
-  export -f uname python3 cmp sudo
+  export -f uname python3 cmp grep sudo
   run_host_map() { bash -c 'source ./install.sh; main --host-map "$@"' _ "$@" </dev/null >"$host_test_dir/output" 2>&1; }
   run_host_map 192.168.5.140 csc-apigateway.ody.cloud
   command cmp "$host_test_dir/original" "$(find "$host_test_dir" -name 'backup.*')"
@@ -63,6 +69,25 @@ PY
   printf '127.0.0.1 localhost' >"$host_test_dir/hosts"
   run_host_map 192.168.5.141 csc-apigateway.ody.cloud
   [[ $(cat "$host_test_dir/hosts") == $'127.0.0.1 localhost\n192.168.5.141\tcsc-apigateway.ody.cloud' ]]
+
+  # The live mapping may already be correct while the boot template is stale.
+  printf "# Your system has configured 'manage_etc_hosts' as True.\n127.0.1.1 pi\n192.168.5.141\tcsc-apigateway.ody.cloud\n" >"$host_test_dir/hosts"
+  printf '## template:jinja\n127.0.1.1 {{fqdn}} {{hostname}}\n192.168.5.2 csc-apigateway.ody.cloud other\n' >"$host_test_dir/hosts.debian.tmpl"
+  cp "$host_test_dir/hosts.debian.tmpl" "$host_test_dir/template-original"
+  run_host_map 192.168.5.141 csc-apigateway.ody.cloud
+  command grep -Fx $'192.168.5.141\tcsc-apigateway.ody.cloud' "$host_test_dir/hosts.debian.tmpl" >/dev/null
+  command grep -Fx '127.0.1.1 {{fqdn}} {{hostname}}' "$host_test_dir/hosts.debian.tmpl" >/dev/null
+  command grep -Fx $'192.168.5.2\tother' "$host_test_dir/hosts.debian.tmpl" >/dev/null
+  command cmp "$host_test_dir/template-original" "$(find "$host_test_dir" -name 'hosts.debian.tmpl.spoke-backup.*')"
+  cp "$host_test_dir/hosts" "$host_test_dir/expected"
+  cp "$host_test_dir/hosts.debian.tmpl" "$host_test_dir/template-expected"
+  rm "$host_test_dir/calls"
+  run_host_map 192.168.5.141 csc-apigateway.ody.cloud
+  [[ ! -e "$host_test_dir/calls" ]]
+  HOST_TEST_FAIL=template
+  if run_host_map 192.168.5.142 csc-apigateway.ody.cloud; then echo 'Ignored template write failure' >&2; exit 1; fi
+  command cmp "$host_test_dir/expected" "$host_test_dir/hosts"
+  command cmp "$host_test_dir/template-expected" "$host_test_dir/hosts.debian.tmpl"
   [[ $(main --help) == *--host-map* ]]
 )
 

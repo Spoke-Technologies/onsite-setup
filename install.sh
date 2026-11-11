@@ -220,22 +220,48 @@ PY
 setup_host_map() (
   [[ $(uname -s) == Linux ]] || die 'Run --host-map on the Pi.'
   command -v python3 >/dev/null || die 'Python 3 is required: sudo apt-get install python3'
-  local directory backup
+  local file backup i j restore_failed=0
+  local targets=(/etc/hosts) changed=() backups=()
   directory=$(mktemp -d)
   trap 'rm -rf -- "$directory"' EXIT
-  render_host_map "$1" "$2" /etc/hosts >"$directory/hosts"
-  if cmp -s /etc/hosts "$directory/hosts"; then
+
+  # shortcut: the Debian template covers Raspberry Pi OS, add other templates if supporting other distributions.
+  if grep -Fxq "# Your system has configured 'manage_etc_hosts' as True." /etc/hosts; then
+    targets+=(/etc/cloud/templates/hosts.debian.tmpl)
+  fi
+  for file in "${targets[@]}"; do
+    render_host_map "$1" "$2" "$file" >"$directory/${file##*/}"
+    if ! cmp -s "$file" "$directory/${file##*/}"; then
+      changed+=("$file")
+    fi
+  done
+  if (( ${#changed[@]} == 0 )); then
     say 'That hostname mapping is already configured.'
     return
   fi
+
   sudo -v
-  backup=$(sudo mktemp /etc/hosts.spoke-backup.XXXXXX)
-  sudo cp -p /etc/hosts "$backup"
-  if ! sudo cp "$directory/hosts" /etc/hosts; then
-    sudo cp -p "$backup" /etc/hosts || die "Could not restore /etc/hosts; restore it from $backup."
-    die "Could not update /etc/hosts; restored $backup."
-  fi
-  say "Hostname mapping saved in /etc/hosts. Backup: $backup"
+  for file in "${changed[@]}"; do
+    backup=$(sudo mktemp "$file.spoke-backup.XXXXXX")
+    sudo cp -p "$file" "$backup"
+    backups+=("$backup")
+  done
+  for i in "${!changed[@]}"; do
+    file=${changed[i]}
+    if ! sudo cp "$directory/${file##*/}" "$file"; then
+      for ((j=i; j>=0; j--)); do
+        if ! sudo cp -p "${backups[j]}" "${changed[j]}"; then
+          warn "Could not restore ${changed[j]} from ${backups[j]}."
+          restore_failed=1
+        fi
+      done
+      (( restore_failed == 0 )) || die "Could not update $file. Restore the files listed above from their backups."
+      die "Could not update $file. Restored the original files."
+    fi
+  done
+  for i in "${!changed[@]}"; do
+    say "Hostname mapping saved in ${changed[i]}. Backup: ${backups[i]}"
+  done
   say 'Keep using the HTTPS hostname. Restart the calling application if it cached the old address.'
 )
 
