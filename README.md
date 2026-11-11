@@ -145,11 +145,14 @@ IPv6 entries), and preserves other hostnames, aliases and comments. Repeating th
 same command does not add duplicate entries. It requires Python 3 and sudo for
 changes, and does not provision AWS or redeploy the agent.
 
-The override persists across reboots and only affects this Pi. Keep using the
+When the Debian cloud-init header is present in `/etc/hosts`, the command also
+backs up and updates `/etc/cloud/templates/hosts.debian.tmpl` so cloud-init
+reapplies the mapping at boot. The override only affects this Pi. Keep using the
 HTTPS URL so the server receives the correct hostname; the server must still
 present a trusted certificate valid for that hostname. Restart the calling
 application if it has cached the old address. To remove the override after DNS
 is fixed, run `sudoedit /etc/hosts` and delete the added hostname entry.
+If the command also updated the cloud-init template, remove the entry there too.
 
 Verify the Pi's system resolver and HTTPS connection:
 
